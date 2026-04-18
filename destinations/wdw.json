@@ -1,0 +1,33 @@
+{
+  "destinationId": "e957da41-3552-4cf6-b636-5babc5cbc4e5",
+  "appUuid": "4c688d07-7860-4fba-82fc-036cc9852087",
+  "name": "Walt Disney World",
+  "appName": "WDW Queues",
+  "shortName": "WDW",
+  "parks": [
+    {
+      "id": "75ea578a-adc8-4116-a54d-dccb60765ef9",
+      "name": "Magic Kingdom",
+      "icon": "castle",
+      "color": "pink"
+    },
+    {
+      "id": "47f90d2c-e191-4239-a466-5892ef59a88b",
+      "name": "EPCOT",
+      "icon": "sphere",
+      "color": "cyan"
+    },
+    {
+      "id": "288747d1-8b4f-4a64-867e-ea7c9b27bad8",
+      "name": "Hollywood Studios",
+      "icon": "star",
+      "color": "red"
+    },
+    {
+      "id": "1c84a229-8862-4648-9c71-378ddd2c7693",
+      "name": "Animal Kingdom",
+      "icon": "tree",
+      "color": "green"
+    }
+  ]
+}

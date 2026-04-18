@@ -1,0 +1,22 @@
+Skip the guesswork. ThemePark Queues brings live theme-park data straight to your Pebble — covering dozens of parks across four continents. No phone-fumbling, no app-switching, no squinting at a tiny map.
+
+Pick a destination:
+- Walt Disney World, Disneyland Paris, Tokyo Disneyland, Hong Kong Disneyland, Shanghai Disneyland.
+- Universal Orlando, Universal Studios Hollywood, Universal Studios Japan.
+- Plus Six Flags, Cedar Fair, Merlin parks, and more — anywhere ThemeParks.wiki covers.
+
+What you get:
+- Live wait times for every attraction in the parks we cover.
+- Show schedules with the next start time highlighted.
+- Opening and closing hours for each park, shown right on the park picker so you know at a glance where's still open.
+- Favourites — pin your must-do rides and shows to the top of the list, kept in sync across park switches.
+- Sort by wait (ascending or descending) or alphabetically.
+
+Built for the watch:
+- Readable at a glance. Traffic-light colour coding (green / amber / red) means you don't need to read numbers to know if it's a walk-on or a two-hour queue.
+- Works on both Pebble Time 2 (rectangular) and Pebble Round 2 (circular) — with native layouts for each.
+- Auto-refreshes every five minutes while open; pull the latest on-demand by switching parks.
+
+Location-aware: ThemePark Queues uses your phone's GPS to nudge nearby destinations to the top of the list, so you're one tap from live waits the moment you walk through the gate.
+
+Powered by ThemeParks.wiki — the community-maintained open API for theme-park wait times.

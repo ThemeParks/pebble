@@ -1,0 +1,15 @@
+Skip the guesswork. WDW Queues brings live Walt Disney World data straight to your Pebble — no phone-fumbling, no app-switching, no squinting at a tiny map.
+
+What you get:
+- Live wait times for every attraction across Magic Kingdom, EPCOT, Hollywood Studios, and Animal Kingdom.
+- Show schedules for every performance, with the next start time highlighted.
+- Opening and closing hours for each park, shown right on the park picker so you know at a glance where's still open.
+- Favourites — pin your must-do rides and shows to the top of the list, kept in sync across park switches.
+- Sort by wait (ascending or descending) or alphabetically.
+
+Built for the watch:
+- Readable at a glance. Traffic-light colour coding (green / amber / red) means you don't need to read numbers to know if it's a walk-on or a two-hour queue.
+- Works on both Pebble Time 2 (rectangular) and Pebble Round 2 (circular) — with native layouts for each.
+- Auto-refreshes every five minutes while open; pull the latest on-demand by switching parks.
+
+Powered by ThemeParks.wiki — the community-maintained open API for theme-park wait times.

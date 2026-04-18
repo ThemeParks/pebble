@@ -1,0 +1,15 @@
+# Default to LF for all text files; Git will normalize on commit.
+* text=auto eol=lf
+
+# Scripts must always be LF — CRLF breaks shebangs on Linux/WSL.
+pebble          text eol=lf
+*.sh            text eol=lf
+*.py            text eol=lf
+*.js            text eol=lf
+
+# Binary assets — leave untouched.
+*.png           binary
+*.jpg           binary
+*.pbw           binary
+*.pbi           binary
+*.pdc           binary

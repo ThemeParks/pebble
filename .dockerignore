@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Build output
+dist/
+builds/
+docs/screenshots/
+screenshots/
+*.pbw
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Docker itself
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Superpowers docs that don't belong in image
+docs/superpowers/

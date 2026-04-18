@@ -1,0 +1,33 @@
+{
+  "destinationId": "89db5d43-c434-4097-b71f-f6869f495a22",
+  "appUuid": "7892bf71-1436-4522-93e6-1c1abf190a2e",
+  "name": "Universal Orlando Resort",
+  "appName": "UOR Queues",
+  "shortName": "UOR",
+  "parks": [
+    {
+      "id": "eb3f4560-2383-4a36-9152-6b3e5ed6bc57",
+      "name": "Universal Studios",
+      "icon": "star",
+      "color": "red"
+    },
+    {
+      "id": "267615cc-8943-4c2a-ae2c-5da728ca591f",
+      "name": "Islands of Adventure",
+      "icon": "castle",
+      "color": "purple"
+    },
+    {
+      "id": "12dbb85b-265f-44e6-bccf-f1faa17211fc",
+      "name": "Epic Universe",
+      "icon": "sphere",
+      "color": "orange"
+    },
+    {
+      "id": "fe78a026-b91b-470c-b906-9d2266b692da",
+      "name": "Volcano Bay",
+      "icon": "tree",
+      "color": "cyan"
+    }
+  ]
+}

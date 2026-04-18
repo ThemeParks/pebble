@@ -1,0 +1,139 @@
+name: build-and-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (with GHA cache)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: pebble-dev:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start container
+        run: |
+          docker rm -f pebble-ci 2>/dev/null || true
+          docker create --name pebble-ci --network host \
+            -e SDL_VIDEODRIVER=dummy \
+            -e DISPLAY=:99 \
+            -e PYTHONUNBUFFERED=1 \
+            pebble-dev:latest sleep infinity
+          docker start pebble-ci
+          docker cp . pebble-ci:/work/
+
+      - name: Network check
+        run: |
+          docker exec pebble-ci curl -sS --max-time 10 \
+            https://api.themeparks.wiki/v1/destinations \
+            -o /dev/null -w "API reachable: HTTP %{http_code}\n" \
+            || echo "WARNING: ThemeParks.wiki API unreachable"
+
+      - name: Build wdw
+        run: docker exec pebble-ci python3 scripts/build_dest.py wdw --build
+
+      - name: Build universalorlando
+        run: docker exec pebble-ci python3 scripts/build_dest.py universalorlando --build
+
+      - name: Build uber (all)
+        run: docker exec pebble-ci python3 scripts/build_dest.py all --build
+
+      # ── wdw flow ─────────────────────────────────────────────────────
+
+      - name: Warm up emulators (wdw)
+        run: docker exec pebble-ci python3 scripts/warmup_emulator.py --dest wdw emery gabbro
+
+      - name: Integration tests (wdw)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/integration_tests.py -v
+
+      - name: Reset emulator for wdw emery screenshots
+        run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; sleep 2'
+
+      - name: Screenshots wdw (emery)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/screenshots.py --dest wdw --platform emery
+
+      - name: Reset emulator for wdw gabbro screenshots
+        run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; sleep 2'
+
+      - name: Screenshots wdw (gabbro)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/screenshots.py --dest wdw --platform gabbro
+
+      # ── uber flow ────────────────────────────────────────────────────
+
+      - name: Reset emulator before uber flow
+        run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; rm -f /root/.pebble-sdk/4.9.148/emery/qemu_spi_flash.bin; rm -f /root/.pebble-sdk/4.9.148/gabbro/qemu_spi_flash.bin; sleep 2'
+
+      - name: Integration tests (uber)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/integration_tests.py --dest all -v
+
+      - name: Reset emulator for uber emery screenshots
+        run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; rm -f /root/.pebble-sdk/4.9.148/emery/qemu_spi_flash.bin; sleep 2'
+
+      - name: Screenshots uber (emery)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/screenshots.py --dest all --platform emery
+
+      - name: Reset emulator for uber gabbro screenshots
+        run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; rm -f /root/.pebble-sdk/4.9.148/gabbro/qemu_spi_flash.bin; sleep 2'
+
+      - name: Screenshots uber (gabbro)
+        continue-on-error: true
+        run: docker exec pebble-ci python3 scripts/screenshots.py --dest all --platform gabbro
+
+      # ── artifacts ────────────────────────────────────────────────────
+
+      - name: Extract artifacts
+        if: always()
+        run: |
+          mkdir -p builds screenshots
+          docker cp pebble-ci:/work/builds/. ./builds/ 2>/dev/null || true
+          docker cp pebble-ci:/work/screenshots/. ./screenshots/ 2>/dev/null || true
+          echo "=== Builds ==="
+          ls -la builds/ 2>/dev/null || echo "(none)"
+          echo "=== Screenshots ==="
+          ls -laR screenshots/ 2>/dev/null || echo "(none)"
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f pebble-ci
+
+      - name: Verify .pbw files
+        run: |
+          test -s builds/wdw.pbw || { echo "FAIL: builds/wdw.pbw missing"; exit 1; }
+          test -s builds/universalorlando.pbw || { echo "FAIL: builds/universalorlando.pbw missing"; exit 1; }
+          test -s builds/all.pbw || { echo "FAIL: builds/all.pbw missing"; exit 1; }
+
+      - name: Upload .pbw artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pbw-builds
+          path: builds/*.pbw
+          if-no-files-found: error
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+          if-no-files-found: warn

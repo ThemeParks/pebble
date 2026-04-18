@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Thin wrapper: routes dev commands into the pebble-dev container.
+# Auto-starts the compose service if not running.
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "$0")")"
+
+SERVICE=pebble-dev
+
+# --- helpers ---
+
+is_service_running() {
+    docker compose ps --services --filter "status=running" 2>/dev/null | grep -qx "$SERVICE"
+}
+
+ensure_up() {
+    if ! is_service_running; then
+        echo "[pebble] starting $SERVICE ..." >&2
+        docker compose up -d "$SERVICE" >/dev/null
+    fi
+}
+
+dexec() {
+    ensure_up
+    docker compose exec "$SERVICE" "$@"
+}
+
+usage() {
+    cat <<'EOF'
+./pebble — Pebble ThemeParks.wiki dev pipeline
+
+Compose lifecycle:
+  ./pebble up [--emu]              start pebble-dev (optionally + novnc at :6080)
+  ./pebble down                    stop everything
+  ./pebble shell                   interactive bash in the container
+  ./pebble status                  show running services
+
+Build:
+  ./pebble build <dest>            build .pbw for a destination
+  ./pebble install <dest> <plat>   build + install to emulator platform (emery|gabbro)
+  ./pebble install <dest> --phone <ip>
+                                   build + install to physical watch via phone IP
+
+Emulator:
+  ./pebble emu [--platform emery|gabbro]
+  ./pebble logs
+  ./pebble screenshots [--platform emery|gabbro]
+  ./pebble test                    integration tests
+  ./pebble soak [--switches N]     soak test
+
+Publish:
+  ./pebble publish <dest>
+
+SDK:
+  ./pebble sdk-apply-patches       apply patches/*.patch inside container
+                                   (also persists so entrypoint re-applies)
+
+Any other argument:
+  ./pebble <cmd> [...]             run cmd inside the container (passthrough)
+EOF
+}
+
+# --- commands ---
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift || true
+
+case "$cmd" in
+    ""|-h|--help|help)
+        usage
+        ;;
+
+    up)
+        if [ "${1:-}" = "--emu" ]; then
+            docker compose --profile emu up -d
+            echo "[pebble] novnc: http://localhost:6080/vnc.html"
+        else
+            docker compose up -d "$SERVICE"
+        fi
+        ;;
+
+    down)
+        docker compose --profile emu down
+        ;;
+
+    status)
+        docker compose ps
+        ;;
+
+    shell)
+        dexec bash
+        ;;
+
+    build)
+        dest="${1:?usage: ./pebble build <dest>}"
+        dexec python3 scripts/build_dest.py "$dest" --build
+        ;;
+
+    install)
+        dest="${1:?usage: ./pebble install <dest> <platform|--phone ip>}"
+        shift
+        if [ "${1:-}" = "--phone" ]; then
+            ip="${2:?--phone requires an IP}"
+            dexec python3 scripts/build_dest.py "$dest" --build
+            dexec pebble install --phone "$ip" "builds/${dest}.pbw"
+        else
+            platform="${1:?usage: ./pebble install <dest> <platform>}"
+            dexec python3 scripts/build_dest.py "$dest" --build --install "$platform"
+        fi
+        ;;
+
+    emu)
+        dexec python3 scripts/emu.py "$@"
+        ;;
+
+    logs)
+        dexec python3 scripts/emu_logs.py "$@"
+        ;;
+
+    screenshots)
+        dexec python3 scripts/screenshots.py "$@"
+        ;;
+
+    test)
+        dexec python3 scripts/integration_tests.py "$@"
+        ;;
+
+    soak)
+        dexec python3 scripts/soak_test.py "$@"
+        ;;
+
+    publish)
+        dest="${1:?usage: ./pebble publish <dest>}"
+        dexec python3 scripts/publish_dest.py "$dest"
+        ;;
+
+    sdk-apply-patches)
+        dexec bash -c '/work/patches/apply.sh && touch /work/.docker-patches-enabled'
+        echo "[pebble] patches applied; entrypoint will re-apply on container restart."
+        ;;
+
+    *)
+        # Passthrough: run arbitrary command in the container.
+        dexec "$cmd" "$@"
+        ;;
+esac

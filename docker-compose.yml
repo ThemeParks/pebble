@@ -1,0 +1,56 @@
+# Dev pipeline for the Pebble ThemeParks.wiki app.
+# Usage: see ./pebble (wrapper script) or:
+#   docker compose up -d                           # start pebble-dev
+#   docker compose --profile emu up -d             # + novnc at http://localhost:6080
+#   docker compose exec pebble-dev bash            # interactive shell
+#   docker compose down                            # stop everything
+
+services:
+  pebble-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    image: pebble-dev:latest
+    container_name: pebble-dev
+    # host network so `pebble install --phone <lan-ip>` and the emulator's
+    # pypkjs WebSocket ports work without explicit port mapping.
+    network_mode: host
+    volumes:
+      - .:/work
+      - pebble-sdk-home:/root/.pebble-sdk
+      - pebble-uv-cache:/root/.cache/uv
+      - x11-socket:/tmp/.X11-unix
+    environment:
+      - DISPLAY=:99
+      - PYTHONUNBUFFERED=1
+    working_dir: /work
+    # entrypoint already set in Dockerfile; no command = sleep infinity
+    stdin_open: true
+    tty: true
+
+  novnc:
+    image: theasp/novnc:latest
+    container_name: pebble-novnc
+    profiles: ["emu"]
+    environment:
+      # Attach x11vnc to pebble-dev's Xvfb on :99 via the shared X11 socket.
+      # (The novnc image still starts its own unused Xvfb on :0 — harmless.)
+      - DISPLAY=:99
+      - DISPLAY_WIDTH=1024
+      - DISPLAY_HEIGHT=768
+      - RUN_XTERM=no
+      - RUN_FLUXBOX=no
+    volumes:
+      - x11-socket:/tmp/.X11-unix
+      # Override x11vnc to point at :99 and disable MIT-SHM (cross-container X).
+      - ./docker/novnc-x11vnc.conf:/app/conf.d/x11vnc.conf:ro
+    ports:
+      - "6080:8080"
+    depends_on:
+      - pebble-dev
+
+volumes:
+  pebble-sdk-home:
+  pebble-uv-cache:
+  x11-socket:

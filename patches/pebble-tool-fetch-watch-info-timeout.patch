@@ -1,0 +1,18 @@
+--- a/libpebble2/communication/__init__.py
++++ b/libpebble2/communication/__init__.py
+@@ -319,7 +319,13 @@ class PebbleConnection(object):
+     def fetch_watch_info(self):
+         """
+         This method should be called before accessing :attr:`watch_info`, :attr:`firmware_version`
+         or :attr:`watch_platform`. Blocks until it has fetched the required information.
+         """
+-        self._watch_info = self.send_and_read(WatchVersion(data=WatchVersionRequest()), WatchVersion).data
++        try:
++            self._watch_info = self.send_and_read(WatchVersion(data=WatchVersionRequest()), WatchVersion).data
++        except Exception:
++            import logging
++            logging.getLogger(__name__).warning("fetch_watch_info timed out — continuing without watch info")
++            self._watch_info = None
+
+     @property
+     def watch_info(self):

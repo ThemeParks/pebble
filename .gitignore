@@ -1,0 +1,25 @@
+# Build outputs
+build/
+builds/
+dist/
+.lock-waf_*
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated at screenshot time
+screenshots/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local tooling config — not for publication
+.claude/
+.superpowers/

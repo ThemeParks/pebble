@@ -1,0 +1,37 @@
+{
+  "name": "pebble-themeparks",
+  "author": "MakeAwesomeHappen",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Walt Disney World",
+    "uuid": "4c688d07-7860-4fba-82fc-036cc9852087",
+    "projectType": "native",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "REQUEST_PARK_ID",
+      "PARK_DATA_JSON",
+      "ERROR_MSG",
+      "REQUEST_ALL_HOURS",
+      "ALL_HOURS_DATA",
+      "DEST_LIST_DATA",
+      "DEST_SELECT",
+      "DEST_PARKS_DATA"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
