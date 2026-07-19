@@ -1,33 +1,173 @@
 #!/usr/bin/env bash
 # Thin wrapper: routes dev commands into the pebble-dev container.
-# Auto-starts the compose service if not running.
+# Auto-starts the container if not running.
+#
+# Container engine: uses wslc (Windows Subsystem for Linux Container CLI)
+# when detected, falling back to docker compose otherwise. Override with
+#   PEBBLE_ENGINE=docker|wslc
+# wslc has no `compose`, so this script replicates docker-compose.yml's
+# pebble-dev + novnc services (volumes, env, ports) with plain commands.
 set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")"
 
 SERVICE=pebble-dev
+IMAGE=pebble-dev:latest
+NOVNC_SERVICE=pebble-novnc
+NOVNC_IMAGE=theasp/novnc:latest
+VOLUMES=(pebble-sdk-home pebble-uv-cache x11-socket)
 
-# --- helpers ---
+# --- engine selection ---
+
+if [ -n "${PEBBLE_ENGINE:-}" ]; then
+    ENGINE="$PEBBLE_ENGINE"
+elif command -v wslc >/dev/null 2>&1; then
+    ENGINE=wslc
+else
+    ENGINE=docker
+fi
+
+case "$ENGINE" in
+    docker|wslc) ;;
+    *) echo "[pebble] unknown PEBBLE_ENGINE '$ENGINE' (want docker|wslc)" >&2; exit 1 ;;
+esac
+
+# --- wslc helpers ---
+
+# wslc is a Windows CLI: suppress Git-Bash path mangling (it would turn
+# container paths like /work into C:/Program Files/Git/work).
+wslc_cmd() {
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' wslc "$@"
+}
+
+# Repo path in the C:/-style form the Windows wslc CLI expects.
+repo_path() {
+    pwd -W 2>/dev/null || pwd
+}
+
+wslc_running() {
+    wslc_cmd list 2>/dev/null | awk 'NR>1 {print $2}' | grep -qx "$1"
+}
+
+wslc_exists() {
+    wslc_cmd list --all 2>/dev/null | awk 'NR>1 {print $2}' | grep -qx "$1"
+}
+
+wslc_ensure_volumes() {
+    local existing v
+    existing="$(wslc_cmd volume list 2>/dev/null || true)"
+    for v in "${VOLUMES[@]}"; do
+        if ! grep -qw "$v" <<<"$existing"; then
+            wslc_cmd volume create "$v" >/dev/null
+        fi
+    done
+}
+
+wslc_ensure_image() {
+    if ! wslc_cmd images 2>/dev/null | awk 'NR>1 {print $1":"$2}' | grep -qx "${IMAGE}"; then
+        echo "[pebble] building $IMAGE (first run — this takes a while) ..." >&2
+        wslc_cmd build -t "$IMAGE" -f Dockerfile .
+    fi
+}
+
+wslc_up_dev() {
+    wslc_ensure_volumes
+    wslc_ensure_image
+    if wslc_running "$SERVICE"; then
+        return
+    fi
+    if wslc_exists "$SERVICE"; then
+        wslc_cmd start "$SERVICE" >/dev/null
+        return
+    fi
+    # Mirrors the pebble-dev service in docker-compose.yml. wslc has no
+    # host networking; everything (qemu, pypkjs, Xvfb) runs inside this
+    # one container, so none is needed. `pebble install --phone <ip>`
+    # still works — that's an outbound connection.
+    wslc_cmd run -d --name "$SERVICE" \
+        -v "$(repo_path):/work" \
+        -v pebble-sdk-home:/root/.pebble-sdk \
+        -v pebble-uv-cache:/root/.cache/uv \
+        -v x11-socket:/tmp/.X11-unix \
+        -e DISPLAY=:99 \
+        -e PYTHONUNBUFFERED=1 \
+        -w /work \
+        "$IMAGE" >/dev/null
+}
+
+wslc_up_novnc() {
+    if wslc_running "$NOVNC_SERVICE"; then
+        return
+    fi
+    if wslc_exists "$NOVNC_SERVICE"; then
+        wslc_cmd start "$NOVNC_SERVICE" >/dev/null
+        return
+    fi
+    wslc_cmd run -d --name "$NOVNC_SERVICE" \
+        -p 6080:8080 \
+        -e DISPLAY=:99 \
+        -e DISPLAY_WIDTH=1024 \
+        -e DISPLAY_HEIGHT=768 \
+        -e RUN_XTERM=no \
+        -e RUN_FLUXBOX=no \
+        -v x11-socket:/tmp/.X11-unix \
+        -v "$(repo_path)/docker/novnc-x11vnc.conf:/app/conf.d/x11vnc.conf:ro" \
+        "$NOVNC_IMAGE" >/dev/null
+}
+
+wslc_down() {
+    local c
+    for c in "$NOVNC_SERVICE" "$SERVICE"; do
+        if wslc_exists "$c"; then
+            wslc_cmd stop "$c" >/dev/null 2>&1 || true
+            wslc_cmd remove "$c" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+# --- engine-agnostic helpers ---
 
 is_service_running() {
-    docker compose ps --services --filter "status=running" 2>/dev/null | grep -qx "$SERVICE"
+    if [ "$ENGINE" = wslc ]; then
+        wslc_running "$SERVICE"
+    else
+        docker compose ps --services --filter "status=running" 2>/dev/null | grep -qx "$SERVICE"
+    fi
 }
 
 ensure_up() {
     if ! is_service_running; then
-        echo "[pebble] starting $SERVICE ..." >&2
-        docker compose up -d "$SERVICE" >/dev/null
+        echo "[pebble] starting $SERVICE (engine: $ENGINE) ..." >&2
+        if [ "$ENGINE" = wslc ]; then
+            wslc_up_dev
+        else
+            docker compose up -d "$SERVICE" >/dev/null
+        fi
     fi
 }
 
 dexec() {
     ensure_up
-    docker compose exec "$SERVICE" "$@"
+    if [ "$ENGINE" = wslc ]; then
+        # -i with a non-console stdin makes wslc fail with
+        # ERROR_INVALID_HANDLE, so only attach stdin when it's a real TTY.
+        local tty_flags=""
+        if [ -t 0 ]; then
+            tty_flags="-i"
+            [ -t 1 ] && tty_flags="-it"
+        fi
+        wslc_cmd exec $tty_flags -w /work "$SERVICE" "$@"
+    else
+        docker compose exec "$SERVICE" "$@"
+    fi
 }
 
 usage() {
     cat <<'EOF'
 ./pebble — Pebble ThemeParks.wiki dev pipeline
+
+Runs on docker compose or wslc (auto-detected; wslc preferred when
+installed, override with PEBBLE_ENGINE=docker|wslc).
 
 Compose lifecycle:
   ./pebble up [--emu]              start pebble-dev (optionally + novnc at :6080)
@@ -72,19 +212,36 @@ case "$cmd" in
 
     up)
         if [ "${1:-}" = "--emu" ]; then
-            docker compose --profile emu up -d
+            if [ "$ENGINE" = wslc ]; then
+                wslc_up_dev
+                wslc_up_novnc
+            else
+                docker compose --profile emu up -d
+            fi
             echo "[pebble] novnc: http://localhost:6080/vnc.html"
         else
-            docker compose up -d "$SERVICE"
+            if [ "$ENGINE" = wslc ]; then
+                wslc_up_dev
+            else
+                docker compose up -d "$SERVICE"
+            fi
         fi
         ;;
 
     down)
-        docker compose --profile emu down
+        if [ "$ENGINE" = wslc ]; then
+            wslc_down
+        else
+            docker compose --profile emu down
+        fi
         ;;
 
     status)
-        docker compose ps
+        if [ "$ENGINE" = wslc ]; then
+            wslc_cmd list --all
+        else
+            docker compose ps
+        fi
         ;;
 
     shell)

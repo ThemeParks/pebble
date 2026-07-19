@@ -430,9 +430,9 @@ def test_favourite_toggle(ctx: TestContext) -> None:
     # toggle landed as OFF, the first-item-might-not-be-top invariant
     # makes the assertion ambiguous; we only assert the ON path.)
     def open_fav_attractions():
-        ctx.press("select", settle=1.5)      # waits → shows
+        ctx.press("select", settle=2.0)      # waits → shows
         ctx.press("select", settle=2.5)      # shows → settings
-        ctx.press("down", settle=1.0)        # cursor → "Fave Attractions"
+        ctx.press("down", settle=1.5)        # cursor → "Fave Attractions"
         ctx.press("select", settle=2.0)      # enter list
 
     def back_to_waits():
@@ -442,11 +442,17 @@ def test_favourite_toggle(ctx: TestContext) -> None:
 
     # Perform one toggle then check. If it happened to land as OFF we
     # toggle once more (a fresh nav cycle) to force ON, then assert.
-    open_fav_attractions()
-    ctx.press("select", settle=1.2)          # single toggle
-    back_to_waits()
-
-    toggles = re.findall(r"SV toggle \S+ (ON|OFF)", ctx.log_text())
+    # The emulator's button channel occasionally drops a press, which
+    # derails the fixed sequence — retry the whole nav cycle once
+    # before declaring failure.
+    toggles: list = []
+    for _attempt in range(2):
+        open_fav_attractions()
+        ctx.press("select", settle=1.2)      # single toggle
+        back_to_waits()
+        toggles = re.findall(r"SV toggle \S+ (ON|OFF)", ctx.log_text())
+        if toggles:
+            break
     if not toggles:
         raise TestFailure(
             "no SV toggle captured — button press lost or wrong screen?\n"
@@ -572,10 +578,12 @@ def _register_uber_tests():
     @test("uber: BACK from single-park view returns to dest picker")
     def test_uber_back_single_park(ctx: TestContext) -> None:
         # Setup: we're in the park view of the destination selected at
-        # startup (Efteling is Nearby[0] in the dest picker when running
-        # against the emulator's fake GPS — it has 1 park). BACK should
-        # take us to the dest picker, not a spurious single-item park
-        # picker.
+        # startup — Nearby[0] in the dest picker. pypkjs fakes GPS by
+        # GeoIP of the host's public IP, so which destination that is
+        # depends on where the tests run (and only matters when it has
+        # exactly 1 park; multi-park destinations skip below). BACK
+        # should take us to the dest picker, not a spurious single-item
+        # park picker.
         blob = ctx.startup_log + ctx.log_text()
         m = re.search(r"populated (\d+) parks from destination", blob)
         if not m or int(m.group(1)) != 1:
@@ -591,6 +599,14 @@ def _register_uber_tests():
         ctx.press("back", settle=2.0)
         # Clear log so we only see events AFTER the BACK press
         ctx.log_output = bytearray()
+        # The dest picker re-requests the (~7KB) destination list every
+        # time it shows; wait for the fresh render marker instead of a
+        # fixed delay so SELECT can't race the list transfer.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            ctx.drain_logs(1.0)
+            if re.search(r"dest_picker: \d+ dests in \d+ sections", ctx.log_text()):
+                break
         ctx.press("select", settle=2.0)
         # Drain a bit more to catch async logs
         ctx.drain_logs(2.0)

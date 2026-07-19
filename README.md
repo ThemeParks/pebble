@@ -10,12 +10,26 @@ Written in **pure Pebble C** targeting:
 
 ## Prerequisites
 
-Just Docker and Docker Compose. That's it — no host-side Pebble SDK, Python, or Node install.
+A container engine. That's it — no host-side Pebble SDK, Python, or Node install. Either of:
 
-```bash
-docker --version        # 24+ recommended
-docker compose version  # v2+
-```
+- **Docker + Docker Compose**
+
+  ```bash
+  docker --version        # 24+ recommended
+  docker compose version  # v2+
+  ```
+
+- **wslc** (Windows Subsystem for Linux Container CLI) — auto-detected and
+  preferred when installed. wslc has no `compose`, so the `./pebble` wrapper
+  drives it directly (build, volumes, run, exec) to the same effect. Force a
+  specific engine with `PEBBLE_ENGINE=docker` or `PEBBLE_ENGINE=wslc`.
+
+  ```bash
+  wslc version
+  ```
+
+  One difference: wslc doesn't support host networking, so the noVNC service
+  is published explicitly on port 6080 (same URL as the compose setup).
 
 ## Quick Start
 

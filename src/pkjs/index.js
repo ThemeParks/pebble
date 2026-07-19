@@ -1,18 +1,21 @@
 // PKJS — runs on the phone. Does all the API fetching, filtering, and
 // transformation. Sends compact payloads to the watch via AppMessage.
 //
-// Message protocol (integer keys are assigned by the Pebble SDK from the
-// `messageKeys` entry in package.json, starting at 10000 in declaration
-// order). When adding new keys, both update package.json AND keep this
-// block in sync.
-const KEY_REQUEST_PARK_ID = 10000;
-const KEY_PARK_DATA_JSON = 10001;
-const KEY_ERROR_MSG = 10002;
-const KEY_REQUEST_ALL_HOURS = 10003;
-const KEY_ALL_HOURS_DATA = 10004;
-const KEY_DEST_LIST_DATA = 10005;
-const KEY_DEST_SELECT = 10006;
-const KEY_DEST_PARKS_DATA = 10007;
+// Message protocol: keys are declared in `messageKeys` in package.json and
+// numbered by the SDK from 10000 in declaration order. The build-generated
+// name→number map comes from require('message_keys').
+//
+// IMPORTANT: incoming e.payload is keyed by the key NAME on real phone
+// apps (the documented PKJS interface). pypkjs (the emulator runtime)
+// additionally includes the numeric keys, which is why numeric-only
+// lookups appear to work in the emulator but silently receive nothing on
+// a physical watch. Always read via msgVal() and send by name.
+var MSG_KEYS = require('message_keys');
+
+function msgVal(payload, name) {
+  if (payload[name] !== undefined) return payload[name];
+  return payload[MSG_KEYS[name]];
+}
 
 const API_BASE = "https://api.themeparks.wiki/v1";
 const STALE_THRESHOLD_MS = 20 * 60 * 1000;
@@ -235,7 +238,7 @@ function buildAndSendDestList() {
     console.log("PKJS: sending dest list (" + payload.length + " bytes, " +
                 dests.length + " destinations)");
     var msg = {};
-    msg[KEY_DEST_LIST_DATA] = payload;
+    msg.DEST_LIST_DATA = payload;
     Pebble.sendAppMessage(msg,
       function () { console.log("PKJS: dest list sent ok"); },
       function () { console.log("PKJS: dest list send failed"); }
@@ -272,7 +275,7 @@ function handleDestSelect(destId) {
     var payload = lines.join("\n");
     console.log("PKJS: sending parks for " + dest.name + " (" + dest.parks.length + " parks)");
     var msg = {};
-    msg[KEY_DEST_PARKS_DATA] = payload;
+    msg.DEST_PARKS_DATA = payload;
     Pebble.sendAppMessage(msg,
       function () {
         console.log("PKJS: dest parks sent ok");
@@ -316,7 +319,7 @@ Pebble.addEventListener("ready", function () {
   // The watch's pebble/message module only fires onWritable after
   // receiving any message from the phone.
   const msg = {};
-  msg[KEY_ERROR_MSG] = "";
+  msg.ERROR_MSG = "";
   Pebble.sendAppMessage(
     msg,
     function () { console.log("PKJS: initial ready signal sent"); },
@@ -326,28 +329,29 @@ Pebble.addEventListener("ready", function () {
 
 Pebble.addEventListener("appmessage", function (e) {
   // Multi-destination: watch requesting destination list
-  if (e.payload[KEY_DEST_LIST_DATA] != null) {
+  if (msgVal(e.payload, "DEST_LIST_DATA") != null) {
     console.log("PKJS: request for destination list");
     buildAndSendDestList();
     return;
   }
 
   // Multi-destination: watch selected a destination
-  if (e.payload[KEY_DEST_SELECT] != null) {
-    console.log("PKJS: destination selected: " + e.payload[KEY_DEST_SELECT]);
-    handleDestSelect(e.payload[KEY_DEST_SELECT]);
+  var destSel = msgVal(e.payload, "DEST_SELECT");
+  if (destSel != null) {
+    console.log("PKJS: destination selected: " + destSel);
+    handleDestSelect(destSel);
     return;
   }
 
   // Bulk-hours request — watch wants open/close for every known park up
   // front so the picker can show them before the user opens any park.
-  if (e.payload[KEY_REQUEST_ALL_HOURS] != null) {
+  if (msgVal(e.payload, "REQUEST_ALL_HOURS") != null) {
     console.log("PKJS: request for all park hours");
     fetchAllHours();
     return;
   }
 
-  const parkId = e.payload[KEY_REQUEST_PARK_ID];
+  const parkId = msgVal(e.payload, "REQUEST_PARK_ID");
   if (!parkId) {
     console.log("PKJS: unknown message, keys: " + Object.keys(e.payload).join(","));
     return;
@@ -378,7 +382,7 @@ Pebble.addEventListener("appmessage", function (e) {
         sendParkData(cached.data);
       } else {
         const msg = {};
-        msg[KEY_ERROR_MSG] = err.message;
+        msg.ERROR_MSG = err.message;
         Pebble.sendAppMessage(msg);
       }
     });
@@ -445,7 +449,7 @@ function fetchAllHours() {
       console.log("PKJS: sending all-hours (" + payload.length + " bytes, "
                   + lines.length + " parks)");
       var msg = {};
-      msg[KEY_ALL_HOURS_DATA] = payload;
+      msg.ALL_HOURS_DATA = payload;
       Pebble.sendAppMessage(
         msg,
         function () { console.log("PKJS: all-hours sent ok"); },
@@ -461,7 +465,7 @@ function sendParkData(data) {
   var payload = encodeParkData(data);
   console.log("PKJS: sending " + payload.length + " bytes");
   var msg = {};
-  msg[KEY_PARK_DATA_JSON] = payload;
+  msg.PARK_DATA_JSON = payload;
   Pebble.sendAppMessage(
     msg,
     function () { console.log("PKJS: sent ok"); },

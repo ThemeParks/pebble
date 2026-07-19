@@ -149,6 +149,9 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context)
 
 	if (err && err->length > 1) {
 		APP_LOG(APP_LOG_LEVEL_WARNING, "PKJS error: %s", err->value->cstring);
+		/* Fetch concluded — clear it so a later outbox failure on an
+		 * unrelated message can't trigger a phantom park retry. */
+		s_pending_park_id[0] = '\0';
 		if (s_callback) s_callback(false);
 		return;
 	}
@@ -159,6 +162,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context)
 	}
 
 	APP_LOG(APP_LOG_LEVEL_INFO, "recv %u bytes", (unsigned)data->length);
+	s_pending_park_id[0] = '\0';
 	bool ok = parkdata_parse(data->value->cstring, data->length);
 	if (s_callback) s_callback(ok);
 }

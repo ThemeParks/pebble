@@ -23,7 +23,7 @@ static void select_handler(ClickRecognizerRef ref, void *ctx)
 
 static void back_handler(ClickRecognizerRef ref, void *ctx)
 {
-	if (s_is_error && s_on_back) s_on_back();
+	if (s_on_back) s_on_back();
 }
 
 static void click_config(Window *w)
@@ -73,13 +73,13 @@ static void ensure_window(void)
 	}
 }
 
-void loading_view_show(const char *park_name)
+void loading_view_show(const char *park_name, loading_back_cb_t on_back)
 {
 	snprintf(s_text, sizeof(s_text), "Loading\n%s...",
 	         park_name ? park_name : "");
 	s_is_error = false;
 	s_on_retry = NULL;
-	s_on_back = NULL;
+	s_on_back = on_back;
 	ensure_window();
 	if (s_label) text_layer_set_text(s_label, s_text);
 }

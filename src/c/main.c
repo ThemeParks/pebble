@@ -42,6 +42,7 @@ static int s_test_switch_count = 0;
 
 static void on_park_data(bool ok);
 static void load_park(int park_idx);
+static void cancel_fetch_watchdog(void);
 static void show_picker(void);
 static void show_park(void);
 static void show_settings(void);
@@ -55,9 +56,25 @@ static void on_error_retry(void)
 	if (s_current_park >= 0) load_park(s_current_park);
 }
 
+static void on_park_back(void);
+
 static void on_error_back(void)
 {
-	show_picker();
+	/* Same exit as BACK from the park view — in the uber app a
+	 * single-park destination must jump to the destination picker, not
+	 * the one-item park picker. */
+	on_park_back();
+}
+
+/* BACK on the plain loading screen: abort the in-flight fetch and fall
+ * back to whichever picker is beneath. Without this the user is stuck
+ * if a request dies silently (e.g. BT dropped mid-send). */
+static void on_loading_abort(void)
+{
+	if (s_refresh_timer) { app_timer_cancel(s_refresh_timer); s_refresh_timer = NULL; }
+	cancel_fetch_watchdog();
+	s_current_park = -1;
+	loading_view_hide();
 }
 
 static void watchdog_tick(void *ctx)
@@ -121,6 +138,10 @@ static void show_picker(void)
 {
 	if (s_refresh_timer) { app_timer_cancel(s_refresh_timer); s_refresh_timer = NULL; }
 	cancel_fetch_watchdog();
+	/* No park is current while browsing a picker — this also makes
+	 * on_park_data() drop any response that was still in flight when the
+	 * user backed out, instead of yanking the park view back on top. */
+	s_current_park = -1;
 	park_view_hide();
 	settings_view_hide();
 	loading_view_hide();
@@ -142,6 +163,12 @@ static void on_park_back(void)
 	 * picker instead. Multi-park destinations fall through to the
 	 * normal park picker. */
 	if (num_parks == 1) {
+		/* Mirror show_picker(): kill the auto-refresh timer and fetch
+		 * watchdog, and clear the current park so a late park-data
+		 * response can't push the park view back over the picker. */
+		if (s_refresh_timer) { app_timer_cancel(s_refresh_timer); s_refresh_timer = NULL; }
+		cancel_fetch_watchdog();
+		s_current_park = -1;
 		park_view_hide();
 		loading_view_hide();
 		settings_view_hide();
@@ -256,8 +283,20 @@ static void on_dest_select(const char *dest_id, int park_count)
 {
 	(void)park_count;  /* unused — we count as we parse on_dest_parks_received */
 	storage_set_last_destination(dest_id);
-	loading_view_show("Loading parks...");
+	loading_view_show("Loading parks...", on_loading_abort);
 	api_select_destination(dest_id);
+}
+
+/* Aborting the resume-last-destination load at startup: fall back to
+ * the destination picker rather than exiting to the watchface (there is
+ * no window beneath the loading screen yet). */
+static void on_startup_loading_back(void)
+{
+	cancel_fetch_watchdog();
+	s_current_park = -1;
+	dest_picker_show(on_dest_select);
+	api_request_dest_list();
+	loading_view_hide();
 }
 
 #endif
@@ -267,6 +306,10 @@ static void on_dest_select(const char *dest_id, int park_count)
 static void on_park_data(bool ok)
 {
 	cancel_fetch_watchdog();
+	/* Data (or an error) for a park we've already navigated away from —
+	 * e.g. the user pressed BACK to a picker while the fetch was in
+	 * flight. Don't let it steal the screen. */
+	if (s_current_park < 0) return;
 	if (!ok) {
 		if (!api_is_connected()) {
 			APP_LOG(APP_LOG_LEVEL_WARNING, "PKJS not connected");
@@ -304,7 +347,7 @@ static void load_park(int park_idx)
 	parkdata_clear();
 	parkdata_set_park_name(g_parks[park_idx].name);
 
-	loading_view_show(g_parks[park_idx].name);
+	loading_view_show(g_parks[park_idx].name, on_loading_abort);
 	schedule_fetch_watchdog();
 	api_fetch_park(g_parks[park_idx].id);
 }
@@ -332,7 +375,7 @@ static void init(void)
 		 * reply with DEST_PARKS_DATA → on_dest_parks_received populates
 		 * g_parks, then either auto-loads the single park or shows the
 		 * park picker. */
-		loading_view_show("Loading parks...");
+		loading_view_show("Loading parks...", on_startup_loading_back);
 		api_select_destination(last_dest);
 	} else {
 		/* First launch — show the destination picker. PKJS fills in
