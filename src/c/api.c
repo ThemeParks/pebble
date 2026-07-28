@@ -13,9 +13,16 @@
 #include "storage.h"
 #include "message_keys.auto.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define INBOX_SIZE 8192
 #define OUTBOX_SIZE 256
+
+/* Payloads bigger than the inbox (the full destination list is ~11KB)
+ * arrive split into newline-boundary chunks tagged with CHUNK_INDEX /
+ * CHUNK_MORE. They're reassembled here before dispatch. The buffer is
+ * heap-allocated only while a transfer is in flight. */
+#define ASM_BUF_SIZE 16384
 
 /* If outbox_failed fires (e.g. PKJS not ready yet), retry after this delay. */
 #define RETRY_DELAY_MS 500
@@ -86,11 +93,70 @@ static void parse_all_hours(char *raw, uint16_t len)
 	APP_LOG(APP_LOG_LEVEL_INFO, "cached hours for %d park(s)", count);
 }
 
+static char *s_asm_buf = NULL;
+static uint16_t s_asm_len = 0;
+static uint32_t s_asm_key = 0;
+static int32_t s_asm_next = 0;   /* next chunk index we expect */
+
+static void asm_reset(void)
+{
+	if (s_asm_buf) {
+		free(s_asm_buf);
+		s_asm_buf = NULL;
+	}
+	s_asm_len = 0;
+	s_asm_key = 0;
+	s_asm_next = 0;
+}
+
+/* Route a complete (reassembled or single-message) payload to its
+ * consumer, identified by which message key carried it. */
+static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
+{
+	if (key == MESSAGE_KEY_ALL_HOURS_DATA) {
+		/* All-hours response — parse + persist, no callback needed */
+		parse_all_hours(buf, len);
+		return;
+	}
+#ifdef MULTI_DESTINATION
+	if (key == MESSAGE_KEY_DEST_LIST_DATA) {
+		if (s_dest_list_cb) s_dest_list_cb(buf, len);
+		return;
+	}
+	if (key == MESSAGE_KEY_DEST_PARKS_DATA) {
+		if (s_dest_parks_cb) s_dest_parks_cb(buf, len);
+		return;
+	}
+#endif
+	if (key == MESSAGE_KEY_PARK_DATA_JSON) {
+		APP_LOG(APP_LOG_LEVEL_INFO, "recv %u bytes", (unsigned)len);
+		s_pending_park_id[0] = '\0';
+		bool ok = parkdata_parse(buf, len);
+		if (s_callback) s_callback(ok);
+	}
+}
+
 static void inbox_received_handler(DictionaryIterator *iter, void *context)
 {
 	Tuple *err = dict_find(iter, MESSAGE_KEY_ERROR_MSG);
+
+	/* Find whichever data key this message carries (at most one). */
+	uint32_t data_key = MESSAGE_KEY_PARK_DATA_JSON;
 	Tuple *data = dict_find(iter, MESSAGE_KEY_PARK_DATA_JSON);
-	Tuple *hours = dict_find(iter, MESSAGE_KEY_ALL_HOURS_DATA);
+	if (!data) {
+		data = dict_find(iter, MESSAGE_KEY_ALL_HOURS_DATA);
+		data_key = MESSAGE_KEY_ALL_HOURS_DATA;
+	}
+#ifdef MULTI_DESTINATION
+	if (!data) {
+		data = dict_find(iter, MESSAGE_KEY_DEST_LIST_DATA);
+		data_key = MESSAGE_KEY_DEST_LIST_DATA;
+	}
+	if (!data) {
+		data = dict_find(iter, MESSAGE_KEY_DEST_PARKS_DATA);
+		data_key = MESSAGE_KEY_DEST_PARKS_DATA;
+	}
+#endif
 
 	/* The first message from PKJS is its empty-error ready signal:
 	 *   {ERROR_MSG: ""}. Use this as the gate to start sending requests. */
@@ -128,25 +194,6 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context)
 #endif
 	}
 
-	if (hours) {
-		/* All-hours response — parse + persist, no callback needed */
-		parse_all_hours(hours->value->cstring, hours->length);
-		return;
-	}
-
-#ifdef MULTI_DESTINATION
-	Tuple *dest_list = dict_find(iter, MESSAGE_KEY_DEST_LIST_DATA);
-	if (dest_list && s_dest_list_cb) {
-		s_dest_list_cb(dest_list->value->cstring, dest_list->length);
-		return;
-	}
-	Tuple *dest_parks = dict_find(iter, MESSAGE_KEY_DEST_PARKS_DATA);
-	if (dest_parks && s_dest_parks_cb) {
-		s_dest_parks_cb(dest_parks->value->cstring, dest_parks->length);
-		return;
-	}
-#endif
-
 	if (err && err->length > 1) {
 		APP_LOG(APP_LOG_LEVEL_WARNING, "PKJS error: %s", err->value->cstring);
 		/* Fetch concluded — clear it so a later outbox failure on an
@@ -161,10 +208,60 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context)
 		return;
 	}
 
-	APP_LOG(APP_LOG_LEVEL_INFO, "recv %u bytes", (unsigned)data->length);
-	s_pending_park_id[0] = '\0';
-	bool ok = parkdata_parse(data->value->cstring, data->length);
-	if (s_callback) s_callback(ok);
+	Tuple *chunk_idx = dict_find(iter, MESSAGE_KEY_CHUNK_INDEX);
+	Tuple *chunk_more = dict_find(iter, MESSAGE_KEY_CHUNK_MORE);
+	if (!chunk_idx) {
+		/* Unchunked payload — dispatch straight from the inbox buffer. */
+		dispatch_payload(data_key, data->value->cstring,
+		                 data->length > 0 ? data->length - 1 : 0);
+		return;
+	}
+
+	int32_t idx = chunk_idx->value->int32;
+	bool more = chunk_more && chunk_more->value->int32 != 0;
+
+	if (idx == 0) {
+		asm_reset();
+		s_asm_buf = malloc(ASM_BUF_SIZE);
+		if (!s_asm_buf) {
+			APP_LOG(APP_LOG_LEVEL_ERROR, "chunk buffer alloc failed");
+			return;
+		}
+		s_asm_buf[0] = '\0';
+		s_asm_key = data_key;
+	}
+	if (!s_asm_buf || s_asm_key != data_key || idx > s_asm_next) {
+		/* Chunk without a matching in-flight transfer (e.g. first chunk
+		 * was dropped, or transfers interleaved) — drop the sequence;
+		 * PKJS-side retries / the fetch watchdog handle recovery. */
+		APP_LOG(APP_LOG_LEVEL_WARNING, "chunk %d out of sequence", (int)idx);
+		asm_reset();
+		return;
+	}
+	if (idx < s_asm_next) {
+		/* Retransmit of a chunk we already appended (the phone missed our
+		 * ack) — ignore it rather than duplicating the bytes. */
+		return;
+	}
+
+	/* Chunks are split at newline boundaries with the separator elided —
+	 * restore it between chunks. Tuple length includes the trailing NUL. */
+	uint16_t dlen = data->length > 0 ? data->length - 1 : 0;
+	if ((uint32_t)s_asm_len + (idx > 0 ? 1 : 0) + dlen + 1 > ASM_BUF_SIZE) {
+		APP_LOG(APP_LOG_LEVEL_WARNING, "chunk overflow at %u bytes — truncating",
+		        (unsigned)s_asm_len);
+	} else {
+		if (idx > 0) s_asm_buf[s_asm_len++] = '\n';
+		memcpy(s_asm_buf + s_asm_len, data->value->cstring, dlen);
+		s_asm_len += dlen;
+		s_asm_buf[s_asm_len] = '\0';
+	}
+	s_asm_next = idx + 1;
+
+	if (more) return;
+
+	dispatch_payload(s_asm_key, s_asm_buf, s_asm_len);
+	asm_reset();
 }
 
 static void inbox_dropped_handler(AppMessageResult reason, void *context)
@@ -236,6 +333,7 @@ void api_deinit(void)
 {
 	if (s_ready_timer) { app_timer_cancel(s_ready_timer); s_ready_timer = NULL; }
 	if (s_heartbeat_timer) { app_timer_cancel(s_heartbeat_timer); s_heartbeat_timer = NULL; }
+	asm_reset();
 	app_message_deregister_callbacks();
 }
 

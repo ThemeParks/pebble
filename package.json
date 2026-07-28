@@ -28,7 +28,9 @@
       "ALL_HOURS_DATA",
       "DEST_LIST_DATA",
       "DEST_SELECT",
-      "DEST_PARKS_DATA"
+      "DEST_PARKS_DATA",
+      "CHUNK_INDEX",
+      "CHUNK_MORE"
     ],
     "resources": {
       "media": []

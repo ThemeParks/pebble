@@ -255,10 +255,22 @@ class TestContext:
         state = QEMU_BUTTON_MAP.get(button)
         if state is None:
             raise TestFailure(f"unknown button: {button}")
-        ws = self._ensure_ws()
-        ws.send_binary(_ws_button_msg(state))
-        time.sleep(0.15)
-        ws.send_binary(_ws_button_msg(0))
+        # pypkjs drops websocket clients when emu-bt-connection toggles the
+        # BT link (the BT-drop test), and websocket-client's .connected stays
+        # True on a half-dead socket — the failure only surfaces on send.
+        # Reconnect once before giving up.
+        for attempt in range(2):
+            ws = self._ensure_ws()
+            try:
+                ws.send_binary(_ws_button_msg(state))
+                time.sleep(0.15)
+                ws.send_binary(_ws_button_msg(0))
+                break
+            except OSError:
+                self._close_ws()
+                if attempt == 1:
+                    raise
+                self._log(f"  press socket died — reconnecting")
         # Let the watch process the event
         self.drain_logs(settle)
 

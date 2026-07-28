@@ -22,7 +22,9 @@
 #include <stdio.h>
 
 #define MAX_SECTIONS 8
-#define MAX_DESTS 150
+/* The API serves ~155 destinations (mid-2026) and grows over time —
+ * keep headroom so the tail of the list isn't silently dropped. */
+#define MAX_DESTS 200
 #define MAX_DEST_NAME 32
 #define MAX_DEST_ID 40
 

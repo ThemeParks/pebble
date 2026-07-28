@@ -55,6 +55,71 @@ const PARK_STYLE = {
 
 const DEFAULT_PALETTE = ["pink", "cyan", "red", "green", "orange", "blue", "purple", "yellow"];
 
+// AppMessage payloads must fit the watch's inbox (8KB, see api.c). The
+// full destination list is ~11KB and growing, so big payloads are split
+// into chunks at newline boundaries and reassembled watch-side. The
+// emulator's pypkjs ignores the negotiated inbox size, which is why
+// oversized single messages "work" there and silently fail on hardware.
+// Budget leaves room for dict/tuple overhead + the two chunk-key tuples.
+var CHUNK_BYTE_LIMIT = 6000;
+
+// JS string length counts UTF-16 units; the wire format is UTF-8.
+function utf8Len(s) {
+  var n = 0;
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c < 0xdc00) { n += 4; i++; }  // surrogate pair
+    else n += 3;
+  }
+  return n;
+}
+
+// Send `payload` under key `keyName`, split into <=CHUNK_BYTE_LIMIT chunks
+// at newline boundaries. Each message carries CHUNK_INDEX and CHUNK_MORE;
+// the watch reassembles and dispatches when CHUNK_MORE is 0. Chunks are
+// sent serially, gated on the previous chunk's ack, with a few retries.
+function sendChunked(keyName, payload, onDone, onFail) {
+  var chunks = [];
+  var lines = payload.split("\n");
+  var cur = "";
+  for (var i = 0; i < lines.length; i++) {
+    if (cur && utf8Len(cur) + 1 + utf8Len(lines[i]) > CHUNK_BYTE_LIMIT) {
+      chunks.push(cur);
+      cur = lines[i];
+    } else {
+      cur = cur ? cur + "\n" + lines[i] : lines[i];
+    }
+  }
+  chunks.push(cur);
+
+  function sendOne(idx, retriesLeft) {
+    var msg = {};
+    msg[keyName] = chunks[idx];
+    msg.CHUNK_INDEX = idx;
+    msg.CHUNK_MORE = idx < chunks.length - 1 ? 1 : 0;
+    Pebble.sendAppMessage(
+      msg,
+      function () {
+        if (idx + 1 < chunks.length) sendOne(idx + 1, 3);
+        else if (onDone) onDone();
+      },
+      function (e) {
+        if (retriesLeft > 0) {
+          console.log("PKJS: chunk " + idx + " of " + keyName + " failed, retrying");
+          setTimeout(function () { sendOne(idx, retriesLeft - 1); }, 500);
+        } else {
+          console.log("PKJS: chunk " + idx + " of " + keyName + " failed permanently");
+          if (onFail) onFail(e);
+        }
+      }
+    );
+  }
+  console.log("PKJS: sending " + keyName + " in " + chunks.length + " chunk(s)");
+  sendOne(0, 3);
+}
+
 function getParkStyle(parkId, indexInDest) {
   var style = PARK_STYLE[parkId];
   if (style) return style;
@@ -80,11 +145,24 @@ function getLocation() {
       resolve(null);
       return;
     }
+    // Belt-and-braces timer: some phone runtimes never invoke either
+    // callback (e.g. location permission denied to the Pebble app at the
+    // OS level), and the `timeout` option isn't honoured everywhere.
+    // Without this the destination list would never be sent.
+    var done = false;
+    var fallback = null;
+    function finish(loc) {
+      if (done) return;
+      done = true;
+      if (fallback !== null) clearTimeout(fallback);
+      resolve(loc);
+    }
+    fallback = setTimeout(function () { finish(null); }, 12000);
     navigator.geolocation.getCurrentPosition(
       function (pos) {
-        resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        finish({ lat: pos.coords.latitude, lon: pos.coords.longitude });
       },
-      function () { resolve(null); },
+      function () { finish(null); },
       { timeout: 10000, maximumAge: 60000 }
     );
   });
@@ -235,11 +313,9 @@ function buildAndSendDestList() {
     }
 
     var payload = lines.join("\n");
-    console.log("PKJS: sending dest list (" + payload.length + " bytes, " +
+    console.log("PKJS: sending dest list (" + utf8Len(payload) + " bytes, " +
                 dests.length + " destinations)");
-    var msg = {};
-    msg.DEST_LIST_DATA = payload;
-    Pebble.sendAppMessage(msg,
+    sendChunked("DEST_LIST_DATA", payload,
       function () { console.log("PKJS: dest list sent ok"); },
       function () { console.log("PKJS: dest list send failed"); }
     );
@@ -274,9 +350,7 @@ function handleDestSelect(destId) {
     }
     var payload = lines.join("\n");
     console.log("PKJS: sending parks for " + dest.name + " (" + dest.parks.length + " parks)");
-    var msg = {};
-    msg.DEST_PARKS_DATA = payload;
-    Pebble.sendAppMessage(msg,
+    sendChunked("DEST_PARKS_DATA", payload,
       function () {
         console.log("PKJS: dest parks sent ok");
         fetchAllHours();
@@ -448,10 +522,7 @@ function fetchAllHours() {
       var payload = lines.join("\n");
       console.log("PKJS: sending all-hours (" + payload.length + " bytes, "
                   + lines.length + " parks)");
-      var msg = {};
-      msg.ALL_HOURS_DATA = payload;
-      Pebble.sendAppMessage(
-        msg,
+      sendChunked("ALL_HOURS_DATA", payload,
         function () { console.log("PKJS: all-hours sent ok"); },
         function () { console.log("PKJS: all-hours send failed"); }
       );
@@ -463,11 +534,8 @@ function fetchAllHours() {
 
 function sendParkData(data) {
   var payload = encodeParkData(data);
-  console.log("PKJS: sending " + payload.length + " bytes");
-  var msg = {};
-  msg.PARK_DATA_JSON = payload;
-  Pebble.sendAppMessage(
-    msg,
+  console.log("PKJS: sending " + utf8Len(payload) + " bytes");
+  sendChunked("PARK_DATA_JSON", payload,
     function () { console.log("PKJS: sent ok"); },
     function (e) {
       console.log("PKJS: send failed");
