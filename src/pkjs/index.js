@@ -173,13 +173,22 @@ function getLocation() {
       resolve(loc);
     }
     fallback = setTimeout(function () { finish(null); }, 12000);
-    navigator.geolocation.getCurrentPosition(
-      function (pos) {
-        finish({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-      },
-      function () { finish(null); },
-      { timeout: 10000, maximumAge: 60000 }
-    );
+    // Some phone runtimes throw synchronously from getCurrentPosition
+    // (e.g. location permission denied at the OS level). An uncaught
+    // throw here would reject the promise and kill the whole dest-list
+    // build — degrade to "no location" instead.
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function (pos) {
+          finish({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        },
+        function () { finish(null); },
+        { timeout: 10000, maximumAge: 60000 }
+      );
+    } catch (e) {
+      console.log("PKJS: geolocation threw: " + e.message);
+      finish(null);
+    }
   });
 }
 

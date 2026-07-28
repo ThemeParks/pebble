@@ -121,6 +121,11 @@ static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
 	}
 #ifdef MULTI_DESTINATION
 	if (key == MESSAGE_KEY_DEST_LIST_DATA) {
+		/* List delivered — stop the re-request watchdog. */
+		if (s_dest_list_retry_timer) {
+			app_timer_cancel(s_dest_list_retry_timer);
+			s_dest_list_retry_timer = NULL;
+		}
 		if (s_dest_list_cb) s_dest_list_cb(buf, len);
 		return;
 	}
@@ -441,6 +446,14 @@ static void dest_list_retry_tick(void *ctx)
 	api_request_dest_list();
 }
 
+/* Re-request cadence when the reply hasn't arrived. The request is a
+ * single tiny message so this is cheap; it stops as soon as a
+ * DEST_LIST_DATA payload is dispatched (see dispatch_payload). Without
+ * it, one lost request or one failed chunk transfer — easy on a busy
+ * real-world BT link, invisible on the emulator's perfect one — leaves
+ * the picker on "Loading destinations..." with no recovery. */
+#define DEST_LIST_WATCHDOG_MS 10000
+
 void api_request_dest_list(void)
 {
 	if (!s_pkjs_ready) {
@@ -451,16 +464,18 @@ void api_request_dest_list(void)
 	AppMessageResult r = app_message_outbox_begin(&iter);
 	if (r != APP_MSG_OK) {
 		/* Usually APP_MSG_BUSY — a park-data or all-hours request holds
-		 * the outbox. Retry shortly; without this the picker can sit on
-		 * "Loading destinations..." forever. */
+		 * the outbox. Retry shortly. */
 		APP_LOG(APP_LOG_LEVEL_INFO, "dest list outbox busy (%d) — retrying", r);
-		if (!s_dest_list_retry_timer) {
-			s_dest_list_retry_timer = app_timer_register(2000, dest_list_retry_tick, NULL);
-		}
+		if (s_dest_list_retry_timer) app_timer_cancel(s_dest_list_retry_timer);
+		s_dest_list_retry_timer = app_timer_register(2000, dest_list_retry_tick, NULL);
 		return;
 	}
 	dict_write_uint8(iter, MESSAGE_KEY_DEST_LIST_DATA, 1);
 	app_message_outbox_send();
+	/* Watchdog: if no dest list lands before this fires, ask again. */
+	if (s_dest_list_retry_timer) app_timer_cancel(s_dest_list_retry_timer);
+	s_dest_list_retry_timer = app_timer_register(DEST_LIST_WATCHDOG_MS,
+	                                             dest_list_retry_tick, NULL);
 }
 
 void api_select_destination(const char *dest_id)
