@@ -540,6 +540,29 @@ def test_hours_prefetch(ctx: TestContext) -> None:
 
 # ── Uber-app-only tests ────────────────────────────────────────────────
 
+# Anaheim, CA. Pins the uber app's "Nearby" list to a known neighborhood:
+# Nearby[0] = Disneyland Resort (2 parks — exercises the park picker),
+# Nearby[1] = Knott's Berry Farm (1 park — exercises the single-park
+# path). See the tpw_test_location hook in src/pkjs/index.js.
+TEST_LOCATION = "33.8121,-117.9190"
+
+
+def _seed_test_location(platform: str) -> None:
+    """Write the GPS pin into the app's PKJS localStorage (a dbm.dumb
+    database keyed by app uuid). Must run while the emulator is down —
+    pypkjs holds the dbm open and would clobber external writes."""
+    import dbm.dumb
+    try:
+        cfg = json.loads((REPO_ROOT / "destinations" / f"{DEST_NAME}.json").read_text())
+        uuid = cfg["appUuid"]
+    except Exception:
+        return
+    ls_dir = PEBBLE_EMU_STATE[platform] / "localstorage"
+    ls_dir.mkdir(parents=True, exist_ok=True)
+    db = dbm.dumb.open(str(ls_dir / uuid), "c")
+    db["tpw_test_location"] = TEST_LOCATION
+    db.close()
+
 # These only register when running with --dest=all. They assert on the
 # extra startup steps the uber app takes: fetching the destination list,
 # parsing it into the picker, and selecting a destination.
@@ -587,58 +610,77 @@ def _register_uber_tests():
         if not m:
             raise TestFailure("no 'dest_picker: selected' log — SELECT lost?")
 
-    @test("uber: BACK from single-park view returns to dest picker")
-    def test_uber_back_single_park(ctx: TestContext) -> None:
-        # Setup: we're in the park view of the destination selected at
-        # startup — Nearby[0] in the dest picker. pypkjs fakes GPS by
-        # GeoIP of the host's public IP, so which destination that is
-        # depends on where the tests run (and only matters when it has
-        # exactly 1 park; multi-park destinations skip below). BACK
-        # should take us to the dest picker, not a spurious single-item
-        # park picker.
-        blob = ctx.startup_log + ctx.log_text()
-        m = re.search(r"populated (\d+) parks from destination", blob)
-        if not m or int(m.group(1)) != 1:
-            # Selected a multi-park dest; skip this test by succeeding
-            # silently — the sibling test_uber_back_multi_park covers it.
-            return
+    # The uber navigation tests below rely on the seeded Anaheim location
+    # (see _seed_test_location): Nearby[0] = Disneyland Resort (2 parks),
+    # Nearby[1] = Knott's Berry Farm (1 park). Startup therefore lands in
+    # a park view of a MULTI-park destination, and each test documents
+    # the screen it ends on because the next one starts there.
 
-        # Press BACK — should hide park_view and show dest_picker. If
-        # instead the park_picker shows, a subsequent SELECT would log
-        # "PV top <name>" (park_picker's SELECT loads the park and PV
-        # re-renders). If dest_picker shows, SELECT logs
-        # "dest_picker: selected <name>". We use that as the discriminator.
-        ctx.press("back", settle=2.0)
-        # Clear log so we only see events AFTER the BACK press
-        ctx.log_output = bytearray()
-        # The dest picker re-requests the (~7KB) destination list every
-        # time it shows; wait for the fresh render marker instead of a
-        # fixed delay so SELECT can't race the list transfer.
-        deadline = time.monotonic() + 15
+    def _wait_for(pattern: str, timeout: float = 12.0):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            ctx.drain_logs(1.0)
-            if re.search(r"dest_picker: \d+ dests in \d+ sections", ctx.log_text()):
-                break
+            _ctx_holder[0].drain_logs(1.0)
+            m = re.search(pattern, _ctx_holder[0].log_text())
+            if m:
+                return m
+        return None
+
+    _ctx_holder: list = [None]
+
+    def _startup_park_count(ctx: TestContext) -> int:
+        m = None
+        for m in re.finditer(r"populated (\d+) parks from destination",
+                             ctx.startup_log):
+            pass
+        return int(m.group(1)) if m else -1
+
+    @test("uber: BACK from park picker returns to dest picker (no exit trap)")
+    def test_uber_back_park_picker_to_dest(ctx: TestContext) -> None:
+        # Regression: the park picker used to be the root window for a
+        # multi-park destination, so BACK exited the app — and because
+        # the last destination is persisted, relaunch auto-resumed the
+        # same destination, locking the user out of the destination list
+        # forever. The fix keeps the dest picker stacked beneath.
+        #
+        # Entry: park view of the (multi-park) startup destination.
+        # Exit:  park view of that destination again.
+        _ctx_holder[0] = ctx
+        if _startup_park_count(ctx) < 2:
+            raise TestFailure(
+                "startup destination is not multi-park — the Anaheim "
+                "location seed did not take effect (tpw_test_location)."
+            )
+
+        ctx.press("back", settle=2.0)   # park view -> park picker
+        ctx.press("back", settle=2.0)   # park picker -> dest picker (the trap)
+        ctx.log_output = bytearray()
+        # On the dest picker, SELECT logs "dest_picker: selected …" (or
+        # "browse region …"). If the app exited instead, nothing logs.
         ctx.press("select", settle=2.0)
-        # Drain a bit more to catch async logs
-        ctx.drain_logs(2.0)
+        ctx.drain_logs(3.0)
         after = ctx.log_text()
-        if re.search(r"dest_picker: selected", after):
-            return  # correct — dest picker is showing
-        raise TestFailure(
-            "expected 'dest_picker: selected' after BACK+SELECT, meaning "
-            "the dest picker is on top. Single-park destinations must skip "
-            "the spurious park picker on BACK.\n"
-            f"--- log after BACK+SELECT ---\n{after[-1500:]}"
-        )
+        if not re.search(r"dest_picker: (selected|browse region)", after):
+            raise TestFailure(
+                "expected a dest_picker log after BACK from the park "
+                "picker — BACK should reveal the destination picker, not "
+                "exit the app.\n"
+                f"--- log ---\n{after[-1500:]}"
+            )
+        # Restore: that SELECT re-picked Nearby[0] (multi-park), so ride
+        # the park picker back into a park view for the next test.
+        if _wait_for(r"populated (\d+) parks") is None:
+            raise TestFailure("destination re-select never populated parks")
+        ctx.press("select", settle=2.0)
+        if _wait_for(r"recv \d+ bytes") is None:
+            raise TestFailure("park never loaded after restore SELECT")
 
     @test("uber: BACK from multi-park view returns to park picker")
     def test_uber_back_multi_park(ctx: TestContext) -> None:
-        # Only runs when the selected destination has multiple parks.
-        blob = ctx.startup_log + ctx.log_text()
-        m = re.search(r"populated (\d+) parks from destination", blob)
-        if not m or int(m.group(1)) < 2:
-            return  # single-park case handled by the sibling test
+        # Entry: park view of the (multi-park) startup destination.
+        # Exit:  park view of that destination again.
+        _ctx_holder[0] = ctx
+        if _startup_park_count(ctx) < 2:
+            return  # unseeded environment — nothing deterministic to do
 
         # Press BACK. Park picker should show. SELECT on the first row
         # of the park picker loads that park, producing "recv N bytes"
@@ -654,6 +696,77 @@ def _register_uber_tests():
         raise TestFailure(
             "expected 'recv N bytes' after BACK+SELECT, meaning the park "
             "picker is on top and SELECT loaded a park.\n"
+            f"--- log after BACK+SELECT ---\n{after[-1500:]}"
+        )
+
+    @test("uber: BACK from single-park view returns to dest picker")
+    def test_uber_back_single_park(ctx: TestContext) -> None:
+        # BACK from a single-park destination's park view must jump to
+        # the dest picker, not a spurious one-item park picker.
+        #
+        # Entry: park view of the (multi-park) startup destination —
+        # first drive to a single-park one: Nearby[1] (Knott's).
+        # Exit:  park view of that single-park destination.
+        _ctx_holder[0] = ctx
+        n = _startup_park_count(ctx)
+        if n >= 2:
+            ctx.press("back", settle=2.0)   # park view -> park picker
+            ctx.press("back", settle=2.0)   # park picker -> dest picker
+            # Walk down the Nearby rows until one populates exactly 1
+            # park (near Anaheim: Universal Studios Hollywood within a
+            # few rows — resort destinations there often bundle water
+            # parks, so fixed row numbers are unreliable).
+            found_single = False
+            for _lap in range(8):
+                ctx.press("down", settle=1.0)
+                ctx.log_output = bytearray()
+                ctx.press("select", settle=2.0)
+                pm = _wait_for(r"populated (\d+) parks")
+                if pm is None:
+                    raise TestFailure("destination selection never populated parks")
+                if int(pm.group(1)) == 1:
+                    found_single = True
+                    break
+                # Multi-park: we're in its park picker — BACK to the
+                # dest picker (the no-exit-trap contract) and continue.
+                ctx.press("back", settle=2.0)
+            if not found_single:
+                raise TestFailure(
+                    "no single-park destination in the first 8 Nearby rows "
+                    "of the seeded neighborhood"
+                )
+            # Single-park destinations auto-load; wait for the park view.
+            if _wait_for(r"recv \d+ bytes") is None:
+                raise TestFailure("single park never loaded")
+        elif n != 1:
+            return  # unknown startup state — unseeded environment
+
+        # Press BACK — should hide park_view and show dest_picker. If
+        # instead the park_picker shows, a subsequent SELECT would log
+        # "PV top <name>" (park_picker's SELECT loads the park and PV
+        # re-renders). If dest_picker shows, SELECT logs
+        # "dest_picker: selected <name>". We use that as the discriminator.
+        ctx.press("back", settle=2.0)
+        # Clear log so we only see events AFTER the BACK press
+        ctx.log_output = bytearray()
+        # The dest picker re-requests the destination list every time a
+        # single-park BACK reveals it; wait for the fresh render marker
+        # instead of a fixed delay so SELECT can't race the transfer.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            ctx.drain_logs(1.0)
+            if re.search(r"dest_picker: \d+ dests in \d+ sections", ctx.log_text()):
+                break
+        ctx.press("select", settle=2.0)
+        # Drain a bit more to catch async logs
+        ctx.drain_logs(2.0)
+        after = ctx.log_text()
+        if re.search(r"dest_picker: selected", after):
+            return  # correct — dest picker is showing
+        raise TestFailure(
+            "expected 'dest_picker: selected' after BACK+SELECT, meaning "
+            "the dest picker is on top. Single-park destinations must skip "
+            "the spurious park picker on BACK.\n"
             f"--- log after BACK+SELECT ---\n{after[-1500:]}"
         )
 
@@ -694,13 +807,29 @@ def main() -> int:
     _set_dest(args.dest)
 
     # Uber mode must start from the destination picker, not a persisted
-    # last-destination — wipe SPI flash for the target platform.
+    # last-destination — wipe SPI flash for the target platform. The
+    # wipe (and the location seed below) only take effect on a fresh
+    # boot, so kill any running emulator first; a warm emulator holds
+    # the old flash image open and its persisted last-destination
+    # changes the startup flow, breaking the dest-picker assertions.
     if UBER_MODE:
+        for pattern in ("pebble install", "pebble logs", "pypkjs", "qemu-pebble"):
+            subprocess.run(["pkill", "-9", "-f", pattern], env=ENV, check=False)
+        time.sleep(2)
+        # Drop the emulator state file too: a SIGKILLed qemu can linger
+        # as a zombie whose pid still "exists", making pebble-tool try
+        # to reuse its dead ports ([Errno 99] Cannot assign requested
+        # address) instead of booting a fresh emulator.
+        try:
+            (Path(tempfile.gettempdir()) / "pb-emulator.json").unlink()
+        except OSError:
+            pass
         flash = Path.home() / ".pebble-sdk" / "4.9.148" / args.platform / "qemu_spi_flash.bin"
         try:
             flash.unlink()
         except Exception:
             pass
+        _seed_test_location(args.platform)
         # Register uber-specific tests
         _register_uber_tests()
 

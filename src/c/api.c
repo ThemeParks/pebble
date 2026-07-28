@@ -53,6 +53,7 @@ static api_dest_list_cb_t s_dest_list_cb = NULL;
 static api_dest_parks_cb_t s_dest_parks_cb = NULL;
 static bool s_dest_list_queued = false;
 static char s_pending_dest_id[40] = {0};  /* empty string = nothing pending */
+static AppTimer *s_dest_list_retry_timer = NULL;
 #endif
 
 static void send_request(void);
@@ -333,6 +334,9 @@ void api_deinit(void)
 {
 	if (s_ready_timer) { app_timer_cancel(s_ready_timer); s_ready_timer = NULL; }
 	if (s_heartbeat_timer) { app_timer_cancel(s_heartbeat_timer); s_heartbeat_timer = NULL; }
+#ifdef MULTI_DESTINATION
+	if (s_dest_list_retry_timer) { app_timer_cancel(s_dest_list_retry_timer); s_dest_list_retry_timer = NULL; }
+#endif
 	asm_reset();
 	app_message_deregister_callbacks();
 }
@@ -431,6 +435,12 @@ void api_set_dest_parks_callback(api_dest_parks_cb_t cb)
 	s_dest_parks_cb = cb;
 }
 
+static void dest_list_retry_tick(void *ctx)
+{
+	s_dest_list_retry_timer = NULL;
+	api_request_dest_list();
+}
+
 void api_request_dest_list(void)
 {
 	if (!s_pkjs_ready) {
@@ -440,7 +450,13 @@ void api_request_dest_list(void)
 	DictionaryIterator *iter;
 	AppMessageResult r = app_message_outbox_begin(&iter);
 	if (r != APP_MSG_OK) {
-		APP_LOG(APP_LOG_LEVEL_WARNING, "dest list outbox_begin: %d", r);
+		/* Usually APP_MSG_BUSY — a park-data or all-hours request holds
+		 * the outbox. Retry shortly; without this the picker can sit on
+		 * "Loading destinations..." forever. */
+		APP_LOG(APP_LOG_LEVEL_INFO, "dest list outbox busy (%d) — retrying", r);
+		if (!s_dest_list_retry_timer) {
+			s_dest_list_retry_timer = app_timer_register(2000, dest_list_retry_tick, NULL);
+		}
 		return;
 	}
 	dict_write_uint8(iter, MESSAGE_KEY_DEST_LIST_DATA, 1);

@@ -10,6 +10,7 @@
 #ifdef MULTI_DESTINATION
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef void (*dest_picker_select_cb_t)(const char *dest_id, int park_count);
 
@@ -22,5 +23,9 @@ void dest_picker_hide(void);
 /* Called by api.c when DEST_LIST_DATA arrives from PKJS. Parses the
  * pipe-delimited payload into internal storage and refreshes the menu. */
 void dest_picker_set_data(const char *data, uint16_t len);
+
+/* True once a destination list has been parsed. Lets main.c decide
+ * whether to re-request the list when revealing the picker. */
+bool dest_picker_has_data(void);
 
 #endif

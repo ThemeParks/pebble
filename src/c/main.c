@@ -145,6 +145,17 @@ static void show_picker(void)
 	park_view_hide();
 	settings_view_hide();
 	loading_view_hide();
+#ifdef MULTI_DESTINATION
+	/* Keep the destination picker on the stack beneath the park picker
+	 * so BACK from the park picker returns to the destination list
+	 * instead of exiting the app. Without this, a user who resumed into
+	 * a multi-park destination could never reach the destination list
+	 * again (relaunch auto-resumes the same destination). */
+	dest_picker_show(on_dest_select);
+	if (!dest_picker_has_data()) {
+		api_request_dest_list();
+	}
+#endif
 	park_picker_show(on_picker_select);
 }
 
@@ -268,7 +279,9 @@ static void on_dest_parks_received(const char *data, uint16_t len)
 	if (num_parks == 1) {
 		load_park(0);
 	} else if (num_parks > 0) {
-		dest_picker_hide();
+		/* show_picker() keeps the destination picker stacked beneath
+		 * the park picker, so don't hide it here — BACK from the park
+		 * picker must land on the destination list. */
 		loading_view_hide();
 		show_picker();
 	}

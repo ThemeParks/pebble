@@ -140,6 +140,21 @@ function classifyRegion(lat, lon) {
 }
 
 function getLocation() {
+  // Test hook: the integration harness seeds this localStorage key to
+  // pin GPS (pypkjs geolocates by the host's datacenter IP, which makes
+  // the "Nearby" list nondeterministic in tests). Real phones never
+  // have the key.
+  try {
+    var fake = localStorage.getItem("tpw_test_location");
+    if (fake) {
+      var parts = String(fake).split(",");
+      var la = parseFloat(parts[0]);
+      var lo = parseFloat(parts[1]);
+      if (!isNaN(la) && !isNaN(lo)) {
+        return Promise.resolve({ lat: la, lon: lo });
+      }
+    }
+  } catch (e) {}
   return new Promise(function (resolve) {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       resolve(null);
@@ -277,7 +292,7 @@ function buildAndSendDestList() {
     if (userLoc) {
       var nearby = withDist.filter(function (x) { return x.dist >= 0; });
       nearby.sort(function (a, b) { return a.dist - b.dist; });
-      nearby = nearby.slice(0, 5);
+      nearby = nearby.slice(0, 10);
       if (nearby.length > 0) {
         lines.push("H|Nearby");
         for (var n = 0; n < nearby.length; n++) {

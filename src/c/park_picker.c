@@ -347,7 +347,9 @@ void park_picker_show(park_picker_select_cb_t on_select)
 			.unload = window_unload,
 		});
 	}
-	window_stack_push(s_window, true);
+	if (!window_stack_contains_window(s_window)) {
+		window_stack_push(s_window, true);
+	}
 }
 
 void park_picker_hide(void)
