@@ -30,7 +30,8 @@
       "DEST_SELECT",
       "DEST_PARKS_DATA",
       "CHUNK_INDEX",
-      "CHUNK_MORE"
+      "CHUNK_MORE",
+      "REQUEST_FORCE"
     ],
     "resources": {
       "media": []

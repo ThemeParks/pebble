@@ -30,12 +30,16 @@ static MenuLayer *s_menu = NULL;
 static char s_park_id[40];
 static sub_t s_sub = SUB_MAIN;
 static settings_back_cb_t s_on_back = NULL;
+static settings_refresh_cb_t s_on_refresh = NULL;
 
 /* Index arrays for fav lists (alphabetical by name). */
 static uint8_t s_fav_idx[MAX_ATTRACTIONS];
 static uint8_t s_fav_count = 0;
 
-static const char *MAIN_LABELS[] = { "Sort", "Fave Attractions", "Fave Shows" };
+/* "Refresh Data" is an action, not a setting — it lives last so the
+ * everyday personalisation rows keep their muscle-memory positions. */
+static const char *MAIN_LABELS[] = { "Sort", "Fave Attractions", "Fave Shows",
+                                     "Refresh Data" };
 static const char *SORT_LABELS[] = { "Longest wait", "Shortest wait", "A - Z" };
 
 static int alpha_compare_attr(uint8_t ai, uint8_t bi)
@@ -114,7 +118,7 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 static uint16_t menu_num_rows(MenuLayer *l, uint16_t section, void *ctx)
 {
 	switch (s_sub) {
-	case SUB_MAIN: return 3;
+	case SUB_MAIN: return 4;
 	case SUB_SORT: return 3;
 	case SUB_FAV_ATTR: return s_fav_count;
 	case SUB_FAV_SHOWS: return s_fav_count;
@@ -227,6 +231,13 @@ static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx)
 		if (idx->row == 0) enter_sub(SUB_SORT);
 		else if (idx->row == 1) enter_sub(SUB_FAV_ATTR);
 		else if (idx->row == 2) enter_sub(SUB_FAV_SHOWS);
+		else if (idx->row == 3) {
+			/* Manual refresh: hand control back to main.c, which
+			 * closes settings and reloads the park bypassing the
+			 * phone-side cache. */
+			APP_LOG(APP_LOG_LEVEL_INFO, "SV manual refresh");
+			if (s_on_refresh) s_on_refresh();
+		}
 		break;
 	case SUB_SORT:
 		storage_set_sort_mode((sort_mode_t)idx->row);
@@ -416,13 +427,15 @@ static void window_unload(Window *w)
 	if (s_header) { layer_destroy(s_header); s_header = NULL; }
 }
 
-void settings_view_show(const char *park_id, settings_back_cb_t on_back)
+void settings_view_show(const char *park_id, settings_back_cb_t on_back,
+                        settings_refresh_cb_t on_refresh)
 {
 	if (park_id) {
 		strncpy(s_park_id, park_id, sizeof(s_park_id) - 1);
 		s_park_id[sizeof(s_park_id) - 1] = '\0';
 	}
 	s_on_back = on_back;
+	s_on_refresh = on_refresh;
 	s_sub = SUB_MAIN;
 	if (!s_window) {
 		s_window = window_create();

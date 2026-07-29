@@ -20,38 +20,16 @@
 #ifdef MULTI_DESTINATION
 
 #include "dest_picker.h"
+#include "dest_parse.h"
 #include "colours.h"
+#include "format.h"
 #include <pebble.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-#define MAX_SECTIONS 8
-/* The API serves ~155 destinations (mid-2026) and grows over time —
- * keep headroom so the tail of the list isn't silently dropped. */
-#define MAX_DESTS 200
-#define MAX_DEST_NAME 32
-#define MAX_DEST_ID 40
-
-typedef struct {
-    char id[MAX_DEST_ID];
-    char name[MAX_DEST_NAME];
-    int park_count;
-    int dist_km;         /* 0 or -1 if unknown/not-shown */
-    int section;
-} dest_entry_t;
-
-typedef struct {
-    char name[MAX_DEST_NAME];
-    int first_row;       /* index into s_dests where this section starts */
-    int count;
-} section_t;
-
-static dest_entry_t s_dests[MAX_DESTS];
-static section_t s_sections[MAX_SECTIONS];
-static int s_dest_count = 0;
-static int s_section_count = 0;
-static int s_nearby_section = -1;   /* index of the "Nearby" section, or -1 */
+/* Destination data + parser live in dest_parse.{c,h} (host-testable);
+ * this file is purely the two-window UI over that store. */
 
 static Window *s_window = NULL;
 static Layer *s_header = NULL;
@@ -68,7 +46,7 @@ static dest_picker_select_cb_t s_callback = NULL;
 static Window *s_region_window = NULL;
 static Layer *s_region_header = NULL;
 static MenuLayer *s_region_menu = NULL;
-static int s_region_section = -1;            /* s_sections index being browsed */
+static int s_region_section = -1;            /* g_dest_sections index being browsed */
 static char s_letter[MAX_LETTERS];
 static int s_letter_start[MAX_LETTERS];      /* offset within the region */
 static int s_letter_count[MAX_LETTERS];
@@ -90,109 +68,22 @@ static GTextAttributes *round_attrs(void)
 #define HEADER_HEIGHT PBL_IF_ROUND_ELSE(46, 32)
 #define ROW_HEIGHT 38
 
-/* --- Parse pipe-delimited payload ----------------------------------- */
-
 static void rebuild_region_index(void);
-
-static void parse_dest_data(const char *data, uint16_t len)
-{
-    s_dest_count = 0;
-    s_section_count = 0;
-    s_nearby_section = -1;
-    int pos = 0;
-    int current_section = -1;
-
-    while (pos < len && s_dest_count < MAX_DESTS) {
-        /* Find end of line */
-        int nl = pos;
-        while (nl < len && data[nl] != '\n') nl++;
-        int line_len = nl - pos;
-
-        if (line_len < 3) {
-            pos = nl + 1;
-            continue;
-        }
-
-        if (data[pos] == 'H' && data[pos + 1] == '|') {
-            /* Section header */
-            if (s_section_count < MAX_SECTIONS) {
-                section_t *sec = &s_sections[s_section_count];
-                int name_len = line_len - 2;
-                if (name_len > MAX_DEST_NAME - 1) name_len = MAX_DEST_NAME - 1;
-                memcpy(sec->name, data + pos + 2, name_len);
-                sec->name[name_len] = '\0';
-                sec->first_row = s_dest_count;
-                sec->count = 0;
-                if (!strcmp(sec->name, "Nearby")) {
-                    s_nearby_section = s_section_count;
-                }
-                current_section = s_section_count;
-                s_section_count++;
-            }
-        } else if (data[pos] == 'D' && data[pos + 1] == '|') {
-            /* Destination row: D|id|name|parkCount|distKm */
-            const char *p = data + pos + 2;
-            const char *end = data + nl;
-            const char *fs = p;
-            int fi = 0;
-            const char *fields[4] = {NULL, NULL, NULL, NULL};
-            int flens[4] = {0, 0, 0, 0};
-            for (const char *c = p; c <= end && fi < 4; c++) {
-                if (c == end || *c == '|') {
-                    fields[fi] = fs;
-                    flens[fi] = (int)(c - fs);
-                    fi++;
-                    fs = c + 1;
-                }
-            }
-            if (fi >= 3) {
-                dest_entry_t *d = &s_dests[s_dest_count];
-                int id_len = flens[0] < MAX_DEST_ID - 1 ? flens[0] : MAX_DEST_ID - 1;
-                memcpy(d->id, fields[0], id_len);
-                d->id[id_len] = '\0';
-                int nm_len = flens[1] < MAX_DEST_NAME - 1 ? flens[1] : MAX_DEST_NAME - 1;
-                memcpy(d->name, fields[1], nm_len);
-                d->name[nm_len] = '\0';
-                char tmp[8];
-                int c2_len = flens[2] < 7 ? flens[2] : 7;
-                memcpy(tmp, fields[2], c2_len);
-                tmp[c2_len] = '\0';
-                d->park_count = atoi(tmp);
-                if (fi >= 4) {
-                    int c3_len = flens[3] < 7 ? flens[3] : 7;
-                    memcpy(tmp, fields[3], c3_len);
-                    tmp[c3_len] = '\0';
-                    d->dist_km = atoi(tmp);
-                } else {
-                    d->dist_km = 0;
-                }
-                d->section = current_section;
-                s_dest_count++;
-                if (current_section >= 0 && current_section < s_section_count) {
-                    s_sections[current_section].count++;
-                }
-            }
-        }
-        pos = nl + 1;
-    }
-    APP_LOG(APP_LOG_LEVEL_INFO, "dest_picker: %d dests in %d sections",
-            s_dest_count, s_section_count);
-}
 
 /* --- region helpers -------------------------------------------------- */
 
 /* Number of region (non-Nearby) sections. */
 static int region_count(void)
 {
-    return s_nearby_section >= 0 ? s_section_count - 1 : s_section_count;
+    return g_dest_nearby_section >= 0 ? g_dest_section_count - 1 : g_dest_section_count;
 }
 
-/* Map a 0-based region row to its s_sections index, skipping Nearby. */
+/* Map a 0-based region row to its g_dest_sections index, skipping Nearby. */
 static int region_to_section(int region_row)
 {
     int r = 0;
-    for (int s = 0; s < s_section_count; s++) {
-        if (s == s_nearby_section) continue;
+    for (int s = 0; s < g_dest_section_count; s++) {
+        if (s == g_dest_nearby_section) continue;
         if (r == region_row) return s;
         r++;
     }
@@ -213,10 +104,10 @@ static char letter_bucket(const char *name)
 static void rebuild_region_index(void)
 {
     s_num_letters = 0;
-    if (s_region_section < 0 || s_region_section >= s_section_count) return;
-    section_t *sec = &s_sections[s_region_section];
+    if (s_region_section < 0 || s_region_section >= g_dest_section_count) return;
+    dest_section_t *sec = &g_dest_sections[s_region_section];
     for (int i = 0; i < sec->count; i++) {
-        char c = letter_bucket(s_dests[sec->first_row + i].name);
+        char c = letter_bucket(g_dests[sec->first_row + i].name);
         if (s_num_letters > 0 && s_letter[s_num_letters - 1] == c) {
             s_letter_count[s_num_letters - 1]++;
         } else if (s_num_letters < MAX_LETTERS) {
@@ -234,10 +125,10 @@ static void rebuild_region_index(void)
 static dest_entry_t *region_dest_at(MenuIndex *idx)
 {
     if (s_region_section < 0 || idx->section >= s_num_letters) return NULL;
-    int i = s_sections[s_region_section].first_row
+    int i = g_dest_sections[s_region_section].first_row
             + s_letter_start[idx->section] + idx->row;
-    if (i < 0 || i >= s_dest_count) return NULL;
-    return &s_dests[i];
+    if (i < 0 || i >= g_dest_count) return NULL;
+    return &g_dests[i];
 }
 
 /* --- shared rendering ------------------------------------------------ */
@@ -285,14 +176,18 @@ static void draw_dest_row(GContext *gctx, const Layer *cell,
         GTextOverflowModeTrailingEllipsis,
         align, attrs);
 
-    /* Subtitle: distance if we have it, otherwise park count */
+    /* Subtitle: distance if we have it, otherwise park count. Unit
+     * follows the watch locale — US/UK users read miles, everyone else
+     * kilometres. Decided once; locale doesn't change mid-session. */
+    static bool s_units_decided = false;
+    static bool s_use_miles = false;
+    if (!s_units_decided) {
+        s_use_miles = format_locale_uses_miles(i18n_get_system_locale());
+        s_units_decided = true;
+    }
     char subtitle[24];
     if (d->dist_km > 0) {
-        if (d->dist_km < 2) {
-            snprintf(subtitle, sizeof(subtitle), "< 1 km");
-        } else {
-            snprintf(subtitle, sizeof(subtitle), "%d km", d->dist_km);
-        }
+        format_distance(d->dist_km, s_use_miles, subtitle, sizeof(subtitle));
     } else {
         snprintf(subtitle, sizeof(subtitle), "%d park%s",
                  d->park_count, d->park_count == 1 ? "" : "s");
@@ -348,7 +243,9 @@ static void draw_section_header(GContext *gctx, const Layer *cell, const char *t
 
 static void header_update_proc(Layer *layer, GContext *gctx)
 {
-    draw_window_header(gctx, layer, "Pick a Park");
+    /* This window lists destinations (resorts), not parks — the park
+     * picker comes after choosing one. */
+    draw_window_header(gctx, layer, "Pick a Destination");
 }
 
 /* --- main menu callbacks ---------------------------------------------
@@ -358,37 +255,47 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 
 static bool has_nearby(void)
 {
-    return s_nearby_section >= 0 && s_sections[s_nearby_section].count > 0;
+    return g_dest_nearby_section >= 0 && g_dest_sections[g_dest_nearby_section].count > 0;
+}
+
+/* When PKJS reports no location fix we still render a "Nearby" section
+ * with a single dim hint row — a silently missing section would read
+ * as "the app is different today" rather than "check the phone's GPS". */
+static bool show_no_location_hint(void)
+{
+    return g_dest_no_location && !has_nearby();
 }
 
 static bool is_region_menu_section(uint16_t section)
 {
-    return !(has_nearby() && section == 0);
+    return !((has_nearby() || show_no_location_hint()) && section == 0);
 }
 
 static uint16_t menu_get_num_sections(struct MenuLayer *l, void *ctx)
 {
-    if (s_section_count == 0) return 1;
-    return has_nearby() ? 2 : 1;
+    if (g_dest_section_count == 0) return 1;
+    return (has_nearby() || show_no_location_hint()) ? 2 : 1;
 }
 
 static uint16_t menu_get_num_rows(struct MenuLayer *l, uint16_t section, void *ctx)
 {
-    if (s_section_count == 0) return 1;  /* "Loading..." placeholder */
-    if (!is_region_menu_section(section)) return s_sections[s_nearby_section].count;
+    if (g_dest_section_count == 0) return 1;  /* "Loading..." placeholder */
+    if (!is_region_menu_section(section)) {
+        return has_nearby() ? g_dest_sections[g_dest_nearby_section].count : 1;
+    }
     return region_count();
 }
 
 static int16_t menu_get_header_height(struct MenuLayer *l, uint16_t section, void *ctx)
 {
-    if (s_section_count == 0) return 0;
+    if (g_dest_section_count == 0) return 0;
     return 18;
 }
 
 static void menu_draw_header(GContext *gctx, const Layer *cell,
                              uint16_t section, void *ctx)
 {
-    if (s_section_count == 0) return;
+    if (g_dest_section_count == 0) return;
     draw_section_header(gctx, cell,
         is_region_menu_section(section) ? "Regions" : "Nearby");
 }
@@ -401,9 +308,9 @@ static int16_t menu_get_cell_height(struct MenuLayer *l, MenuIndex *idx, void *c
 static dest_entry_t *nearby_dest_at(MenuIndex *idx)
 {
     if (!has_nearby()) return NULL;
-    int i = s_sections[s_nearby_section].first_row + idx->row;
-    if (i < 0 || i >= s_dest_count) return NULL;
-    return &s_dests[i];
+    int i = g_dest_sections[g_dest_nearby_section].first_row + idx->row;
+    if (i < 0 || i >= g_dest_count) return NULL;
+    return &g_dests[i];
 }
 
 static void menu_draw_row(GContext *gctx, const Layer *cell,
@@ -412,7 +319,7 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
     GRect b = layer_get_bounds(cell);
     bool selected = menu_cell_layer_is_highlighted(cell);
 
-    if (s_dest_count == 0) {
+    if (g_dest_count == 0) {
         /* Placeholder row when no data yet */
         graphics_context_set_text_color(gctx, GColorBlack);
         graphics_draw_text(gctx, "Loading destinations...",
@@ -424,6 +331,29 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
     }
 
     if (!is_region_menu_section(idx->section)) {
+        if (show_no_location_hint()) {
+            /* Dim, non-selectable hint in place of nearby rows. */
+            const int PAD_H = PBL_IF_ROUND_ELSE(40, 6);
+            graphics_context_set_text_color(gctx,
+                selected ? COL_ROW_SELECTED_FG : COL_ROW_FG);
+            graphics_draw_text(gctx, "No location",
+                fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                GRect(b.origin.x + PAD_H, b.origin.y + 1,
+                      b.size.w - PAD_H * 2, 22),
+                GTextOverflowModeTrailingEllipsis,
+                PBL_IF_ROUND_ELSE(GTextAlignmentCenter, GTextAlignmentLeft),
+                NULL);
+            graphics_context_set_text_color(gctx,
+                selected ? COL_ROW_SELECTED_FG : COL_WAIT_DIM);
+            graphics_draw_text(gctx, "Check phone GPS access",
+                fonts_get_system_font(FONT_KEY_GOTHIC_14),
+                GRect(b.origin.x + PAD_H, b.origin.y + 18,
+                      b.size.w - PAD_H * 2, 16),
+                GTextOverflowModeTrailingEllipsis,
+                PBL_IF_ROUND_ELSE(GTextAlignmentCenter, GTextAlignmentLeft),
+                NULL);
+            return;
+        }
         dest_entry_t *d = nearby_dest_at(idx);
         if (d) draw_dest_row(gctx, cell, d, idx->row, selected);
         return;
@@ -449,15 +379,15 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
     GTextAlignment align = GTextAlignmentLeft;
 #endif
     graphics_context_set_text_color(gctx, selected ? COL_ROW_SELECTED_FG : COL_ROW_FG);
-    graphics_draw_text(gctx, s_sections[sec].name,
+    graphics_draw_text(gctx, g_dest_sections[sec].name,
         fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
         GRect(b.origin.x + PAD, b.origin.y + 1, b.size.w - PAD * 2, 22),
         GTextOverflowModeTrailingEllipsis, align, attrs);
 
     char subtitle[28];
     snprintf(subtitle, sizeof(subtitle), "All %d destination%s",
-             s_sections[sec].count,
-             s_sections[sec].count == 1 ? "" : "s");
+             g_dest_sections[sec].count,
+             g_dest_sections[sec].count == 1 ? "" : "s");
     graphics_context_set_text_color(gctx,
         selected ? COL_ROW_SELECTED_FG : COL_WAIT_DIM);
     graphics_draw_text(gctx, subtitle,
@@ -470,8 +400,9 @@ static void region_window_push(int section_idx);
 
 static void menu_select(struct MenuLayer *l, MenuIndex *idx, void *ctx)
 {
-    if (s_dest_count == 0) return;
+    if (g_dest_count == 0) return;
     if (!is_region_menu_section(idx->section)) {
+        if (show_no_location_hint()) return;   /* hint row — not a pick */
         dest_entry_t *d = nearby_dest_at(idx);
         if (!d || !s_callback) return;
         APP_LOG(APP_LOG_LEVEL_INFO, "dest_picker: selected %s", d->name);
@@ -481,7 +412,7 @@ static void menu_select(struct MenuLayer *l, MenuIndex *idx, void *ctx)
     int sec = region_to_section(idx->row);
     if (sec < 0) return;
     APP_LOG(APP_LOG_LEVEL_INFO, "dest_picker: browse region %s",
-            s_sections[sec].name);
+            g_dest_sections[sec].name);
     region_window_push(sec);
 }
 
@@ -489,8 +420,8 @@ static void menu_select(struct MenuLayer *l, MenuIndex *idx, void *ctx)
 
 static void region_header_update_proc(Layer *layer, GContext *gctx)
 {
-    const char *title = (s_region_section >= 0 && s_region_section < s_section_count)
-        ? s_sections[s_region_section].name : "";
+    const char *title = (s_region_section >= 0 && s_region_section < g_dest_section_count)
+        ? g_dest_sections[s_region_section].name : "";
     draw_window_header(gctx, layer, title);
 }
 
@@ -706,7 +637,7 @@ void dest_picker_hide(void)
 
 void dest_picker_set_data(const char *data, uint16_t len)
 {
-    parse_dest_data(data, len);
+    dest_parse(data, len);
     if (s_menu) menu_layer_reload_data(s_menu);
     /* If the user is inside a region window, the underlying rows may
      * have shifted — rebuild the letter index against the fresh data.
@@ -720,7 +651,7 @@ void dest_picker_set_data(const char *data, uint16_t len)
 
 bool dest_picker_has_data(void)
 {
-    return s_dest_count > 0;
+    return g_dest_count > 0;
 }
 
 #endif /* MULTI_DESTINATION */

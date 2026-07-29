@@ -56,3 +56,7 @@ bool parkdata_parse(const char *raw, uint16_t raw_len);
 
 /* Set the park name (called by api.c after parse using the requested name). */
 void parkdata_set_park_name(const char *name);
+
+/* True iff we have attraction data and none of it is operating — the
+ * park-closed header state. Empty data reads as "unknown", not closed. */
+bool parkdata_all_closed(void);

@@ -30,6 +30,9 @@
 
 static api_park_cb_t s_callback = NULL;
 static char s_pending_park_id[40];
+/* Manual ("force") refreshes tell PKJS to bypass its fresh-cache check.
+ * The flag rides alongside s_pending_park_id through queueing/retries. */
+static bool s_pending_force = false;
 static int s_retries_left = 0;
 static AppTimer *s_retry_timer = NULL;
 
@@ -121,8 +124,11 @@ static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
 	}
 #ifdef MULTI_DESTINATION
 	if (key == MESSAGE_KEY_DEST_LIST_DATA) {
-		/* List delivered — stop the re-request watchdog. */
-		if (s_dest_list_retry_timer) {
+		/* List delivered — stop the re-request watchdog. An empty payload
+		 * (upstream API hiccup) keeps it alive: parsing zero destinations
+		 * is harmless, but cancelling would strand the picker on
+		 * "Loading destinations..." with no recovery. */
+		if (len > 0 && s_dest_list_retry_timer) {
 			app_timer_cancel(s_dest_list_retry_timer);
 			s_dest_list_retry_timer = NULL;
 		}
@@ -369,6 +375,9 @@ static void send_request(void)
 		return;
 	}
 	dict_write_cstring(iter, MESSAGE_KEY_REQUEST_PARK_ID, s_pending_park_id);
+	if (s_pending_force) {
+		dict_write_uint8(iter, MESSAGE_KEY_REQUEST_FORCE, 1);
+	}
 	r = app_message_outbox_send();
 	if (r != APP_MSG_OK) {
 		APP_LOG(APP_LOG_LEVEL_WARNING, "outbox_send: %d", r);
@@ -411,7 +420,7 @@ void api_fetch_all_hours(void)
 	}
 }
 
-void api_fetch_park(const char *park_id)
+static void fetch_park_impl(const char *park_id, bool force)
 {
 	if (!park_id) return;
 	if (s_retry_timer) {
@@ -420,6 +429,7 @@ void api_fetch_park(const char *park_id)
 	}
 	strncpy(s_pending_park_id, park_id, sizeof(s_pending_park_id) - 1);
 	s_pending_park_id[sizeof(s_pending_park_id) - 1] = '\0';
+	s_pending_force = force;
 	s_retries_left = MAX_RETRIES;
 
 	if (!s_pkjs_ready) {
@@ -427,6 +437,16 @@ void api_fetch_park(const char *park_id)
 		return;
 	}
 	send_request();
+}
+
+void api_fetch_park(const char *park_id)
+{
+	fetch_park_impl(park_id, false);
+}
+
+void api_fetch_park_force(const char *park_id)
+{
+	fetch_park_impl(park_id, true);
 }
 
 #ifdef MULTI_DESTINATION

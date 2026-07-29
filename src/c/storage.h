@@ -23,6 +23,13 @@ typedef enum {
 
 void storage_init(void);
 
+/* Call when g_parks is repopulated (uber destination switch): drops the
+ * favourites/hours RAM caches and deletes the persisted per-slot hours,
+ * which would otherwise surface the PREVIOUS destination's hours under
+ * the new destination's park names (slots are positional). Favourites
+ * persist is kept — it's user data, re-read lazily per slot. */
+void storage_on_parks_changed(void);
+
 sort_mode_t storage_get_sort_mode(void);
 void storage_set_sort_mode(sort_mode_t mode);
 

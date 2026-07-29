@@ -88,6 +88,19 @@ uint8_t sort_attractions(const char *park_id, sort_mode_t mode,
 	return n;
 }
 
+int sort_find_id(const uint8_t *sorted, uint8_t count,
+                 fav_list_kind_t kind, const char *id)
+{
+	if (!sorted || !id || !id[0]) return -1;
+	for (uint8_t i = 0; i < count; i++) {
+		const char *cand = (kind == FAV_ATTRACTIONS)
+			? g_park.attractions[sorted[i]].id
+			: g_park.shows[sorted[i]].id;
+		if (strcmp(cand, id) == 0) return i;
+	}
+	return -1;
+}
+
 /* Shows: filter out empty-times, then favourites first, rest in PKJS order. */
 uint8_t sort_shows(const char *park_id, uint8_t out[MAX_SHOWS])
 {

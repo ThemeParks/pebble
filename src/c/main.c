@@ -32,6 +32,12 @@
 static int s_current_park = -1;
 static AppTimer *s_refresh_timer = NULL;
 static AppTimer *s_fetch_watchdog = NULL;
+/* True while an auto-refresh fetch is in flight. A silent refresh must be
+ * invisible: on success the park view updates in place (same page, same
+ * cursor row); on failure the user keeps the stale-but-usable data — the
+ * header's age suffix tells them how old it is. Only user-initiated loads
+ * get the loading screen / error screen treatment. */
+static bool s_silent_refresh = false;
 #define FETCH_WATCHDOG_MS 20000   /* 20s — beyond the api.c retry window */
 
 #ifdef TEST_MODE
@@ -42,6 +48,8 @@ static int s_test_switch_count = 0;
 
 static void on_park_data(bool ok);
 static void load_park(int park_idx);
+static void load_park_force(int park_idx);
+static void schedule_refresh(void);
 static void cancel_fetch_watchdog(void);
 static void show_picker(void);
 static void show_park(void);
@@ -104,6 +112,12 @@ static void refresh_tick(void *ctx)
 {
 	s_refresh_timer = NULL;
 	if (s_current_park >= 0) {
+		s_silent_refresh = true;
+		/* Re-arm NOW rather than when the response lands — a lost reply
+		 * (BT drop mid-transfer) must not silently kill every future
+		 * auto-refresh. on_park_data() re-arms again on success, which
+		 * just pushes the next tick out; that's fine. */
+		schedule_refresh();
 		api_fetch_park(g_parks[s_current_park].id);
 	}
 }
@@ -209,10 +223,21 @@ static void show_park(void)
 	park_view_show(g_parks[s_current_park].id, on_park_back, on_park_settings);
 }
 
+static void on_settings_refresh(void)
+{
+	/* Manual refresh from settings: close settings and reload the park
+	 * with the phone-cache bypass — the user explicitly asked for
+	 * now-data (e.g. just walked out of a queue). */
+	if (s_current_park < 0) return;
+	settings_view_hide();
+	load_park_force(s_current_park);
+}
+
 static void show_settings(void)
 {
 	if (s_current_park < 0) return;
-	settings_view_show(g_parks[s_current_park].id, on_settings_back);
+	settings_view_show(g_parks[s_current_park].id, on_settings_back,
+	                   on_settings_refresh);
 }
 
 #ifdef MULTI_DESTINATION
@@ -271,6 +296,10 @@ static void on_dest_parks_received(const char *data, uint16_t len)
 	}
 	APP_LOG(APP_LOG_LEVEL_INFO, "populated %d parks from destination", num_parks);
 
+	/* g_parks slots now mean different parks — drop slot-keyed caches
+	 * (and the persisted hours, which belonged to the old destination). */
+	storage_on_parks_changed();
+
 	/* PKJS pushes hours unprompted after DEST_PARKS_DATA (via its
 	 * handleDestSelect .then(fetchAllHours) chain). We don't need to
 	 * call api_fetch_all_hours here — and doing so races with the
@@ -319,11 +348,20 @@ static void on_startup_loading_back(void)
 static void on_park_data(bool ok)
 {
 	cancel_fetch_watchdog();
+	bool silent = s_silent_refresh;
+	s_silent_refresh = false;
 	/* Data (or an error) for a park we've already navigated away from —
 	 * e.g. the user pressed BACK to a picker while the fetch was in
 	 * flight. Don't let it steal the screen. */
 	if (s_current_park < 0) return;
 	if (!ok) {
+		if (silent) {
+			/* Background refresh failed — keep the stale-but-usable data
+			 * on screen. The header age suffix shows its age, and the
+			 * next auto-refresh is already scheduled. */
+			APP_LOG(APP_LOG_LEVEL_WARNING, "silent refresh failed - keeping stale data");
+			return;
+		}
 		if (!api_is_connected()) {
 			APP_LOG(APP_LOG_LEVEL_WARNING, "PKJS not connected");
 			if (s_current_park >= 0) {
@@ -345,14 +383,24 @@ static void on_park_data(bool ok)
 			                       g_park.schedule_close);
 		}
 	}
-	show_park();
-	park_view_data_changed();
+	if (silent) {
+		/* In-place update: same page, cursor back on the same ride. Also
+		 * never pops windows, so a user sitting in settings stays there. */
+		park_view_refresh();
+		APP_LOG(APP_LOG_LEVEL_INFO, "silent refresh applied");
+	} else {
+		show_park();
+		park_view_data_changed();
+	}
 	schedule_refresh();
 }
 
-static void load_park(int park_idx)
+static void load_park_ex(int park_idx, bool force)
 {
 	if (park_idx < 0 || park_idx >= NUM_PARKS) return;
+	/* A user-initiated load supersedes any in-flight auto-refresh — its
+	 * response (if it ever lands) must get the foreground treatment. */
+	s_silent_refresh = false;
 	s_current_park = park_idx;
 	storage_set_last_park(g_parks[park_idx].id);
 
@@ -362,7 +410,18 @@ static void load_park(int park_idx)
 
 	loading_view_show(g_parks[park_idx].name, on_loading_abort);
 	schedule_fetch_watchdog();
-	api_fetch_park(g_parks[park_idx].id);
+	if (force) api_fetch_park_force(g_parks[park_idx].id);
+	else api_fetch_park(g_parks[park_idx].id);
+}
+
+static void load_park(int park_idx)
+{
+	load_park_ex(park_idx, false);
+}
+
+static void load_park_force(int park_idx)
+{
+	load_park_ex(park_idx, true);
 }
 
 /* --- app lifecycle -------------------------------------------------- */

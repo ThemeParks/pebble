@@ -54,6 +54,18 @@ void parkdata_clear(void)
 	/* park_name preserved across clears so loading screen has it */
 }
 
+bool parkdata_all_closed(void)
+{
+	/* Drives the "Closed" header state in the park view: only claim the
+	 * park is closed when we have data and not a single ride operates.
+	 * An empty list means "no data", not "closed". */
+	if (g_park.attraction_count == 0) return false;
+	for (uint8_t i = 0; i < g_park.attraction_count; i++) {
+		if (g_park.attractions[i].status == 'O') return false;
+	}
+	return true;
+}
+
 void parkdata_set_park_name(const char *name)
 {
 	if (!name) { g_park.park_name[0] = '\0'; return; }

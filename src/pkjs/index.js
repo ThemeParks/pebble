@@ -12,13 +12,29 @@
 // a physical watch. Always read via msgVal() and send by name.
 var MSG_KEYS = require('message_keys');
 
+// Pure helpers (encoding, chunk-splitting, time/region math) live in
+// lib.js so the JS unit tests can exercise them without a phone runtime.
+var lib = require('./lib');
+var utf8Len = lib.utf8Len;
+var splitIntoChunks = lib.splitIntoChunks;
+var encodeParkData = lib.encodeParkData;
+var shouldServeCache = lib.shouldServeCache;
+var getTodaySchedule = lib.getTodaySchedule;
+var classifyRegion = lib.classifyRegion;
+var haversineDist = lib.haversineDist;
+var buildDestLines = lib.buildDestLines;
+var filterLiveData = lib.filterLiveData;
+
 function msgVal(payload, name) {
   if (payload[name] !== undefined) return payload[name];
   return payload[MSG_KEYS[name]];
 }
 
 const API_BASE = "https://api.themeparks.wiki/v1";
-const STALE_THRESHOLD_MS = 20 * 60 * 1000;
+// Just under the watch's 5-minute auto-refresh cadence, so each refresh
+// fetches live data instead of replaying this cache. The cache still
+// serves quick park re-entry and the stale-fallback on fetch errors.
+const STALE_THRESHOLD_MS = 4 * 60 * 1000;
 const CACHE_KEY_PREFIX = "tpw_cache_";
 
 // Destination ID — used to fetch all park schedules in one request.
@@ -63,36 +79,13 @@ const DEFAULT_PALETTE = ["pink", "cyan", "red", "green", "orange", "blue", "purp
 // Budget leaves room for dict/tuple overhead + the two chunk-key tuples.
 var CHUNK_BYTE_LIMIT = 6000;
 
-// JS string length counts UTF-16 units; the wire format is UTF-8.
-function utf8Len(s) {
-  var n = 0;
-  for (var i = 0; i < s.length; i++) {
-    var c = s.charCodeAt(i);
-    if (c < 0x80) n += 1;
-    else if (c < 0x800) n += 2;
-    else if (c >= 0xd800 && c < 0xdc00) { n += 4; i++; }  // surrogate pair
-    else n += 3;
-  }
-  return n;
-}
-
 // Send `payload` under key `keyName`, split into <=CHUNK_BYTE_LIMIT chunks
-// at newline boundaries. Each message carries CHUNK_INDEX and CHUNK_MORE;
-// the watch reassembles and dispatches when CHUNK_MORE is 0. Chunks are
-// sent serially, gated on the previous chunk's ack, with a few retries.
+// at newline boundaries (see lib.splitIntoChunks). Each message carries
+// CHUNK_INDEX and CHUNK_MORE; the watch reassembles and dispatches when
+// CHUNK_MORE is 0. Chunks are sent serially, gated on the previous
+// chunk's ack, with a few retries.
 function sendChunked(keyName, payload, onDone, onFail) {
-  var chunks = [];
-  var lines = payload.split("\n");
-  var cur = "";
-  for (var i = 0; i < lines.length; i++) {
-    if (cur && utf8Len(cur) + 1 + utf8Len(lines[i]) > CHUNK_BYTE_LIMIT) {
-      chunks.push(cur);
-      cur = lines[i];
-    } else {
-      cur = cur ? cur + "\n" + lines[i] : lines[i];
-    }
-  }
-  chunks.push(cur);
+  var chunks = splitIntoChunks(payload, CHUNK_BYTE_LIMIT);
 
   function sendOne(idx, retriesLeft) {
     var msg = {};
@@ -127,16 +120,6 @@ function getParkStyle(parkId, indexInDest) {
     icon: "circle",
     color: DEFAULT_PALETTE[indexInDest % DEFAULT_PALETTE.length],
   };
-}
-
-// Rough lat/lon bounding boxes. Not precise — just needs each destination
-// to land in a sensible bucket.
-function classifyRegion(lat, lon) {
-  if (lat > 15 && lon < -50) return "North America";
-  if (lat >= -55 && lat <= 15 && lon < -30) return "Latin America";
-  if (lat > 35 && lon >= -15 && lon < 45) return "Europe";
-  if (lat >= 15 && lat < 45 && lon >= 25 && lon < 65) return "Middle East & Africa";
-  return "Asia Pacific";
 }
 
 function getLocation() {
@@ -190,17 +173,6 @@ function getLocation() {
       finish(null);
     }
   });
-}
-
-function haversineDist(lat1, lon1, lat2, lon2) {
-  var R = 6371; // km
-  var toRad = function (d) { return d * Math.PI / 180; };
-  var dLat = toRad(lat2 - lat1);
-  var dLon = toRad(lon2 - lon1);
-  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-          Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 // Fetch destination list + park locations from API, cache for 24h.
@@ -285,58 +257,10 @@ function buildAndSendDestList() {
     var dests = results[0];
     var userLoc = results[1];
 
-    var withDist = [];
-    for (var i = 0; i < dests.length; i++) {
-      var d = dests[i];
-      var dist = -1;
-      if (userLoc && d.lat != null && d.lon != null) {
-        dist = haversineDist(userLoc.lat, userLoc.lon, d.lat, d.lon);
-      }
-      withDist.push({ dest: d, dist: dist });
-    }
-
-    var lines = [];
-
-    // Nearby section (only if GPS worked)
-    if (userLoc) {
-      var nearby = withDist.filter(function (x) { return x.dist >= 0; });
-      nearby.sort(function (a, b) { return a.dist - b.dist; });
-      nearby = nearby.slice(0, 10);
-      if (nearby.length > 0) {
-        lines.push("H|Nearby");
-        for (var n = 0; n < nearby.length; n++) {
-          var nd = nearby[n];
-          lines.push("D|" + nd.dest.id + "|" + nd.dest.name + "|" +
-                     nd.dest.parkCount + "|" + Math.round(nd.dist));
-        }
-      }
-    }
-
-    // Regions
-    var regions = {};
-    for (var j = 0; j < dests.length; j++) {
-      var dd = dests[j];
-      if (dd.lat == null) continue;
-      var region = classifyRegion(dd.lat, dd.lon);
-      if (!regions[region]) regions[region] = [];
-      regions[region].push(dd);
-    }
-    var regionNames = Object.keys(regions).sort();
-    for (var r = 0; r < regionNames.length; r++) {
-      lines.push("H|" + regionNames[r]);
-      var rDests = regions[regionNames[r]];
-      rDests.sort(function (a, b) {
-        if (a.name < b.name) return -1;
-        if (a.name > b.name) return 1;
-        return 0;
-      });
-      for (var rd = 0; rd < rDests.length; rd++) {
-        lines.push("D|" + rDests[rd].id + "|" + rDests[rd].name + "|" +
-                   rDests[rd].parkCount + "|0");
-      }
-    }
-
-    var payload = lines.join("\n");
+    // Line building lives in lib.js (buildDestLines) so it's unit
+    // tested — including the X|nogps marker the watch renders as a
+    // "No location" hint where the Nearby section would be.
+    var payload = buildDestLines(dests, userLoc).join("\n");
     console.log("PKJS: sending dest list (" + utf8Len(payload) + " bytes, " +
                 dests.length + " destinations)");
     sendChunked("DEST_LIST_DATA", payload,
@@ -455,11 +379,14 @@ Pebble.addEventListener("appmessage", function (e) {
     return;
   }
 
-  console.log("PKJS: request for park " + parkId);
+  // REQUEST_FORCE marks a manual "Refresh Data" — bypass the fresh-cache
+  // check (the stale-fallback on fetch errors below still applies).
+  var force = !!msgVal(e.payload, "REQUEST_FORCE");
+  console.log("PKJS: request for park " + parkId + (force ? " (forced)" : ""));
 
   // Serve from cache if fresh (memory + localStorage fallback)
   const cached = loadCache(parkId);
-  if (cached && Date.now() - cached.timestamp < STALE_THRESHOLD_MS) {
+  if (shouldServeCache(cached, Date.now(), STALE_THRESHOLD_MS, force)) {
     const ageMins = Math.floor((Date.now() - cached.timestamp) / 60000);
     console.log("PKJS: serving cached data (" + ageMins + "m old)");
     sendParkData(cached.data);
@@ -485,39 +412,6 @@ Pebble.addEventListener("appmessage", function (e) {
       }
     });
 });
-
-// Encode park data as pipe-delimited lines instead of JSON.
-// This lets the watch parse without JSON.parse(), which creates dozens of
-// objects that permanently consume XS chunk heap (no GC on Pebble).
-//
-// Format:
-//   Line 1: schedule — "open|close" or empty
-//   Line 2: lastUpdated timestamp
-//   Lines:  "A|id|name|status|waitMins"   (attractions, waitMins may be empty)
-//   Lines:  "S|id|name|status|t1,t2,..."  (shows, times comma-separated)
-function encodeParkData(data) {
-  var lines = [];
-  // Schedule line
-  if (data.sc) {
-    lines.push(data.sc.o + "|" + data.sc.c);
-  } else {
-    lines.push("");
-  }
-  // Timestamp
-  lines.push(String(data.u || Date.now()));
-  // Attractions
-  for (var i = 0; i < data.a.length; i++) {
-    var a = data.a[i];
-    lines.push("A|" + a[0] + "|" + a[1] + "|" + a[2] + "|" + (a[3] == null ? "" : a[3]));
-  }
-  // Shows
-  for (var i = 0; i < data.h.length; i++) {
-    var s = data.h[i];
-    var times = s[3] ? s[3].join(",") : "";
-    lines.push("S|" + s[0] + "|" + s[1] + "|" + s[2] + "|" + times);
-  }
-  return lines.join("\n");
-}
 
 // Fetch open/close for every park in one request to the destination
 // schedule endpoint. The response includes a `parks` array with each
@@ -577,6 +471,13 @@ function xhrGet(url) {
   return new Promise(function (resolve, reject) {
     const xhr = new XMLHttpRequest();
     xhr.open("GET", url, true);
+    // A hung request would otherwise leave the watch waiting out its full
+    // 20s fetch watchdog — fail fast so the stale-cache fallback (or a
+    // retry) takes over sooner.
+    xhr.timeout = 10000;
+    xhr.ontimeout = function () {
+      reject(new Error("timeout"));
+    };
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
@@ -637,108 +538,5 @@ function fetchAndFilter(parkId) {
   });
 }
 
-// Map full status to short code to save bytes
-function shortStatus(s) {
-  if (s === "OPERATING") return "O";
-  if (s === "CLOSED") return "C";
-  if (s === "DOWN") return "D";
-  if (s === "REFURBISHMENT") return "R";
-  return "?";
-}
-
-// Use last 8 hex chars of UUID as a compact ID (still unique within a park)
-function shortId(id) {
-  return id ? id.replace(/-/g, "").slice(-8) : "";
-}
-
-// Keep up to 36 chars so the watch renderer has slack to show more of
-// the name on wide rows (middle of the gabbro circle, or the full-width
-// stacked Shows row). The per-row GRect + text-flow handles ellipsis
-// based on actual available width. 36 chars fits most Disney names in
-// full ("The Twilight Zone Tower of Terror" is 34).
-function shortName(name) {
-  if (!name || name.length <= 36) return name;
-  return name.slice(0, 35) + ".";
-}
-
-function filterLiveData(liveData) {
-  const attractions = [];
-  const shows = [];
-
-  for (let i = 0; i < liveData.length; i++) {
-    const entity = liveData[i];
-    if (entity.entityType === "ATTRACTION") {
-      const waitTime = entity.queue && entity.queue.STANDBY ? entity.queue.STANDBY.waitTime : null;
-      // Compact array format: [id, name, status, waitMins]
-      attractions.push([
-        shortId(entity.id),
-        shortName(entity.name),
-        shortStatus(entity.status),
-        waitTime == null ? null : waitTime,
-      ]);
-    } else if (entity.entityType === "SHOW") {
-      const times = [];
-      if (entity.showtimes) {
-        // Keep only next 4 upcoming, pre-formatted to short time strings
-        const now = Date.now();
-        for (let j = 0; j < entity.showtimes.length && times.length < 4; j++) {
-          const t = entity.showtimes[j].startTime;
-          if (new Date(t).getTime() > now) {
-            times.push(formatTime(t));
-          }
-        }
-      }
-      // Compact array format: [id, name, status, times]
-      shows.push([
-        shortId(entity.id),
-        shortName(entity.name),
-        shortStatus(entity.status),
-        times,
-      ]);
-    }
-  }
-
-  return { a: attractions, h: shows };
-}
-
-function getTodaySchedule(schedule, todayStr) {
-  // Try an exact match first (fast path, correct for UTC-ish parks).
-  for (var i = 0; i < schedule.length; i++) {
-    var entry = schedule[i];
-    if (entry.date === todayStr && entry.type === "OPERATING") {
-      return {
-        o: formatTime(entry.openingTime),
-        c: formatTime(entry.closingTime),
-      };
-    }
-  }
-  // Fall back to "current or next OPERATING session" — needed for parks
-  // east of UTC near midnight, where the park's local "today" has already
-  // rolled over to the next UTC date.
-  var now = Date.now();
-  for (var j = 0; j < schedule.length; j++) {
-    var e = schedule[j];
-    if (e.type !== "OPERATING") continue;
-    var closeMs = e.closingTime ? new Date(e.closingTime).getTime() : 0;
-    if (closeMs > now) {
-      return {
-        o: formatTime(e.openingTime),
-        c: formatTime(e.closingTime),
-      };
-    }
-  }
-  return null;
-}
-
-function formatTime(isoString) {
-  // Extract HH:MM from ISO string — the timezone offset in the string
-  // already reflects the park's local time
-  const match = isoString.match(/T(\d{2}):(\d{2})/);
-  if (!match) return "";
-  let hours = parseInt(match[1], 10);
-  const minutes = parseInt(match[2], 10);
-  const ampm = hours >= 12 ? "PM" : "AM";
-  hours = hours % 12 || 12;
-  const min = minutes > 0 ? ":" + (minutes < 10 ? "0" + minutes : minutes) : "";
-  return hours + min + " " + ampm;
-}
+// shortStatus / shortId / shortName / filterLiveData / getTodaySchedule /
+// formatTime moved to lib.js (pure, unit-testable).

@@ -21,6 +21,10 @@ void api_set_callback(api_park_cb_t cb);
 /* Send a request for park data. PKJS will respond with the pipe payload. */
 void api_fetch_park(const char *park_id);
 
+/* Same, but tells PKJS to bypass its fresh-cache check — the manual
+ * "Refresh Data" action, for users who want now-data on demand. */
+void api_fetch_park_force(const char *park_id);
+
 /* Ask PKJS for the current open/close hours of every known park. The
  * response is parsed into storage_set_park_hours() for each park. Used
  * once at startup so the park picker can show hours before any park

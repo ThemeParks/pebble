@@ -271,7 +271,38 @@ class TestContext:
                 if attempt == 1:
                     raise
                 self._log(f"  press socket died — reconnecting")
-        # Let the watch process the event
+        # Let the watch process the event. drain_logs returns early when
+        # the log goes quiet, which on log-silent screens (settings, menus)
+        # collapsed the whole settle to ~0.1s — presses then arrived faster
+        # than the emulator reliably processes them and long navigation
+        # sequences derailed. Sleep out the remainder so `settle` is a
+        # floor, not a ceiling.
+        start = time.monotonic()
+        self.drain_logs(settle)
+        leftover = settle - (time.monotonic() - start)
+        if leftover > 0:
+            time.sleep(leftover)
+
+    def press_long(self, button: str, hold: float = 0.7, settle: float = 1.0) -> None:
+        """Long-press: hold the button past the app's 500ms long-click
+        threshold (park view subscribes long SELECT for favourite
+        toggling), then release."""
+        self._log(f"  long-press {button}")
+        state = QEMU_BUTTON_MAP.get(button)
+        if state is None:
+            raise TestFailure(f"unknown button: {button}")
+        for attempt in range(2):
+            ws = self._ensure_ws()
+            try:
+                ws.send_binary(_ws_button_msg(state))
+                time.sleep(hold)
+                ws.send_binary(_ws_button_msg(0))
+                break
+            except OSError:
+                self._close_ws()
+                if attempt == 1:
+                    raise
+                self._log("  press socket died — reconnecting")
         self.drain_logs(settle)
 
     def wait(self, seconds: float) -> None:
@@ -426,6 +457,38 @@ def test_refresh_cycles(ctx: TestContext) -> None:
         ctx.press("select", settle=1.0)   # pick first park
         ctx.wait(8)                       # wait for data fetch
         ctx.assert_no_crash()
+    ctx.assert_no_crash()
+
+
+@test("long-press favourite from park view")
+def test_longpress_favourite(ctx: TestContext) -> None:
+    # park_view.c subscribes long SELECT (500ms) to toggle favourite on
+    # the highlighted row in place — no settings round-trip. It logs the
+    # same "SV toggle <id> ON|OFF" marker settings_view.c uses, then
+    # re-sorts ("PV top ..."). Registered BEFORE the settings-navigation
+    # favourite test on purpose: entry state here is the stable park
+    # waits view left by the reload-cycles test, not the end state of a
+    # long button-sequence test. Exit state: park waits view, favourites
+    # returned to how we found them.
+    toggles: list = []
+    for _attempt in range(2):
+        ctx.log_output = bytearray()
+        ctx.press_long("select", settle=2.5)
+        toggles = re.findall(r"SV toggle \S+ (ON|OFF)", ctx.log_text())
+        if toggles:
+            break
+        ctx.wait(1.5)   # emulator occasionally drops a press — retry once
+    if not toggles:
+        raise TestFailure(
+            "no 'SV toggle' after long SELECT — long-click not firing?\n"
+            f"--- log ---\n{ctx.log_text()[-1500:]}"
+        )
+    # The in-place re-sort must have run (and, when the toggle landed ON,
+    # pinned the row: cursor follows it, list shows FAV on top).
+    if not re.search(r"PV top ", ctx.log_text()):
+        raise TestFailure("no 'PV top' re-sort log after long-press toggle")
+    # Toggle back so we leave favourites as we found them for later tests.
+    ctx.press_long("select", settle=2.0)
     ctx.assert_no_crash()
 
 

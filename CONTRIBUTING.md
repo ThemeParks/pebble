@@ -23,14 +23,21 @@ See [`README.md`](README.md) for the full command reference and the host-native 
 
 ## Running the tests
 
+Unit tests run on the host toolchain (gcc + node) — no emulator. They cover the pure-logic C modules (`parkdata`, `sort`, `storage`, `format`, `dest_parse`) against a stubbed `<pebble.h>`, and the pure PKJS helpers in `src/pkjs/lib.js`.
+
+```bash
+./pebble python3 scripts/unit_tests.py        # all unit suites
+./pebble python3 scripts/unit_tests.py -k sort  # filter by name
+```
+
 Integration tests boot the emulator, drive the app with button presses, and assert on log output and screenshots.
 
 ```bash
-./pebble test              # WDW integration tests (7)
-./pebble test --dest all   # uber-app tests (includes the 7 WDW tests + 5 uber-specific)
+./pebble test              # WDW integration tests
+./pebble test --dest all   # uber-app tests (WDW tests + uber-specific)
 ```
 
-All tests must pass before a PR can be merged. If you're adding a feature that touches navigation or data flow, add an integration test for it. See `scripts/integration_tests.py` for the patterns.
+All tests must pass before a PR can be merged. New logic goes in a host-testable module (`lib.js`, or a `<pebble.h>`-free C file) with unit tests; features that touch navigation or data flow also get an integration test. See `scripts/integration_tests.py` for the patterns.
 
 ## Running screenshots
 

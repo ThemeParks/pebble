@@ -28,6 +28,10 @@ jobs:
           docker start pebble-ci
           docker cp . pebble-ci:/work/
 
+      # Fast host-side tests first — no emulator, must fail the build.
+      - name: Unit tests
+        run: docker exec pebble-ci python3 scripts/unit_tests.py
+
       - name: Network check
         run: |
           docker exec pebble-ci curl -sS --max-time 10 \

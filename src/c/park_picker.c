@@ -12,6 +12,7 @@
 #include "config.h"
 #include "colours.h"
 #include "storage.h"
+#include "format.h"
 #include <pebble.h>
 #include <string.h>
 #include <stdio.h>
@@ -128,13 +129,17 @@ static const GPathInfo STAR_PATH_INFO = {
 	},
 };
 
+/* Icon GPaths are created once and kept for the app's lifetime —
+ * creating/destroying them per row per frame is heap churn inside the
+ * scroll animation's draw loop. */
+static GPath *s_star_path = NULL;
+
 static void draw_star(GContext *gctx, int cx, int cy, GColor col)
 {
-	GPath *p = gpath_create(&STAR_PATH_INFO);
-	gpath_move_to(p, GPoint(cx, cy));
+	if (!s_star_path) s_star_path = gpath_create(&STAR_PATH_INFO);
+	gpath_move_to(s_star_path, GPoint(cx, cy));
 	graphics_context_set_fill_color(gctx, col);
-	gpath_draw_filled(gctx, p);
-	gpath_destroy(p);
+	gpath_draw_filled(gctx, s_star_path);
 }
 
 /* Tree — proper triangular canopy drawn as a filled GPath, with a
@@ -149,13 +154,14 @@ static const GPathInfo TREE_CANOPY_INFO = {
 	},
 };
 
+static GPath *s_tree_path = NULL;
+
 static void draw_tree(GContext *gctx, int cx, int cy, GColor col)
 {
 	graphics_context_set_fill_color(gctx, col);
-	GPath *p = gpath_create(&TREE_CANOPY_INFO);
-	gpath_move_to(p, GPoint(cx, cy));
-	gpath_draw_filled(gctx, p);
-	gpath_destroy(p);
+	if (!s_tree_path) s_tree_path = gpath_create(&TREE_CANOPY_INFO);
+	gpath_move_to(s_tree_path, GPoint(cx, cy));
+	gpath_draw_filled(gctx, s_tree_path);
 	/* Trunk — same colour so it reads as one icon. */
 	graphics_fill_rect(gctx, GRect(cx - 1, cy + 3, 2, 4), 0, GCornerNone);
 }
@@ -266,8 +272,14 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
 	 * to align under the name, not the icon. */
 	char open[PARK_HOURS_STR_LEN], close[PARK_HOURS_STR_LEN];
 	if (storage_get_park_hours(g_parks[idx->row].id, open, close)) {
+		/* Cached hours are wire-format "HH:MM" (or a legacy pre-formatted
+		 * string, which passes through) — render per clock preference. */
+		char open_fmt[PARK_HOURS_STR_LEN], close_fmt[PARK_HOURS_STR_LEN];
+		bool use_24h = clock_is_24h_style();
+		format_clock_time(open, use_24h, open_fmt, sizeof(open_fmt));
+		format_clock_time(close, use_24h, close_fmt, sizeof(close_fmt));
 		char hours[32];
-		snprintf(hours, sizeof(hours), "%s - %s", open, close);
+		snprintf(hours, sizeof(hours), "%s - %s", open_fmt, close_fmt);
 		GColor hours_col = selected
 			? COL_ROW_SELECTED_FG : COL_WAIT_DIM;
 		graphics_context_set_text_color(gctx, hours_col);

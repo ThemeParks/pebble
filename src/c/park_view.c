@@ -16,6 +16,7 @@
 #include "storage.h"
 #include "config.h"
 #include "colours.h"
+#include "format.h"
 #include <pebble.h>
 #include <string.h>
 
@@ -53,6 +54,10 @@ static park_view_settings_cb_t s_on_settings = NULL;
  * the first row, giving the attractions/shows list more vertical space.
  * Tabs stay anchored to the top of the menu area. */
 static bool s_header_collapsed = false;
+/* Id of the row under the cursor, tracked continuously so a background
+ * refresh can put the cursor back on the same ride/show after the
+ * re-sort shuffles row order (waits change → positions change). */
+static char s_selected_id[MAX_ID_LEN] = "";
 
 /* --- header ---------------------------------------------------------- */
 
@@ -75,21 +80,23 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	/* Hours + freshness (bottom, accent tint). "· Nm" appears once data
 	 * is ≥2min old so the user knows whether they're looking at live
 	 * figures. Hidden when fresh to keep the header uncluttered. */
-	char hours[40];
+	/* Times come over the wire as 24h "HH:MM" and are rendered per the
+	 * user's clock preference. When every ride is closed the line leads
+	 * with "Closed" so a wall of grey rows reads as intentional. */
+	char hours[48];
 	char age_suffix[12];
-	age_suffix[0] = '\0';
-	if (g_park.last_updated_secs > 0) {
-		time_t now = time(NULL);
-		int age_s = (int)(now - (time_t)g_park.last_updated_secs);
-		if (age_s >= 120) {
-			int age_m = age_s / 60;
-			if (age_m < 60) snprintf(age_suffix, sizeof(age_suffix), " \u00b7 %dm", age_m);
-			else snprintf(age_suffix, sizeof(age_suffix), " \u00b7 %dh", age_m / 60);
-		}
-	}
+	format_age_suffix((uint32_t)time(NULL), g_park.last_updated_secs,
+	                  age_suffix, sizeof(age_suffix));
+	bool closed = parkdata_all_closed();
 	if (g_park.has_schedule) {
-		snprintf(hours, sizeof(hours), "%s - %s%s",
-		         g_park.schedule_open, g_park.schedule_close, age_suffix);
+		char open[MAX_HOURS_LEN], close[MAX_HOURS_LEN];
+		bool use_24h = clock_is_24h_style();
+		format_clock_time(g_park.schedule_open, use_24h, open, sizeof(open));
+		format_clock_time(g_park.schedule_close, use_24h, close, sizeof(close));
+		snprintf(hours, sizeof(hours), "%s%s - %s%s",
+		         closed ? "Closed \u00b7 " : "", open, close, age_suffix);
+	} else if (closed) {
+		snprintf(hours, sizeof(hours), "Closed%s", age_suffix);
 	} else if (age_suffix[0]) {
 		snprintf(hours, sizeof(hours), "updated%s", age_suffix);
 	} else {
@@ -128,7 +135,11 @@ static int16_t menu_row_height(MenuLayer *l, MenuIndex *idx, void *ctx)
 static void tabs_update_proc(Layer *layer, GContext *gctx)
 {
 	GRect b = layer_get_bounds(layer);
-	int half = b.size.w / 2;
+	/* A small square gear segment sits at the right end of the strip —
+	 * a discoverability hint that SELECT eventually reaches settings
+	 * (Waits → Shows → Settings). It's an affordance, not a button. */
+	int gear_w = b.size.h;
+	int half = (b.size.w - gear_w) / 2;
 
 	bool waits_active = (s_page == PAGE_WAITS);
 
@@ -144,18 +155,37 @@ static void tabs_update_proc(Layer *layer, GContext *gctx)
 		GRect(b.origin.x, b.origin.y + 2, half, b.size.h - 2),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
-	/* Right: SHOWS */
+	/* Middle: SHOWS */
 	graphics_context_set_fill_color(gctx,
 		waits_active ? COL_TAB_INACTIVE_BG : COL_TAB_ACTIVE_BG);
 	graphics_fill_rect(gctx, GRect(b.origin.x + half, b.origin.y,
-	                               b.size.w - half, b.size.h),
+	                               b.size.w - gear_w - half, b.size.h),
 	                   0, GCornerNone);
 	graphics_context_set_text_color(gctx,
 		waits_active ? COL_TAB_INACTIVE_FG : COL_TAB_ACTIVE_FG);
 	graphics_draw_text(gctx, "SHOWS",
 		fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-		GRect(b.origin.x + half, b.origin.y + 2, b.size.w - half, b.size.h - 2),
+		GRect(b.origin.x + half, b.origin.y + 2,
+		      b.size.w - gear_w - half, b.size.h - 2),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+	/* Right: gear glyph. Filled circle + four teeth + a hole punched in
+	 * the segment background colour. ~12px total — any finer detail is
+	 * lost at this size. */
+	int gx = b.origin.x + b.size.w - gear_w;
+	graphics_context_set_fill_color(gctx, COL_TAB_INACTIVE_BG);
+	graphics_fill_rect(gctx, GRect(gx, b.origin.y, gear_w, b.size.h),
+	                   0, GCornerNone);
+	int cx = gx + gear_w / 2;
+	int cy = b.origin.y + b.size.h / 2;
+	graphics_context_set_fill_color(gctx, COL_TAB_INACTIVE_FG);
+	graphics_fill_rect(gctx, GRect(cx - 1, cy - 6, 2, 3), 0, GCornerNone);
+	graphics_fill_rect(gctx, GRect(cx - 1, cy + 3, 2, 3), 0, GCornerNone);
+	graphics_fill_rect(gctx, GRect(cx - 6, cy - 1, 3, 2), 0, GCornerNone);
+	graphics_fill_rect(gctx, GRect(cx + 3, cy - 1, 3, 2), 0, GCornerNone);
+	graphics_fill_circle(gctx, GPoint(cx, cy), 4);
+	graphics_context_set_fill_color(gctx, COL_TAB_INACTIVE_BG);
+	graphics_fill_circle(gctx, GPoint(cx, cy), 2);
 }
 
 static void format_wait(const attraction_t *a, char *out, int outsz)
@@ -188,16 +218,20 @@ static void format_show_times(const show_t *s, int max_times,
 	out[0] = '\0';
 	int limit = s->time_count;
 	if (limit > max_times) limit = max_times;
+	bool use_24h = clock_is_24h_style();
 	for (int i = 0; i < limit; i++) {
+		char t[MAX_TIME_LEN];
+		format_clock_time(s->times[i], use_24h, t, sizeof(t));
 		if (i > 0) strncat(out, ", ", outsz - strlen(out) - 1);
-		strncat(out, s->times[i], outsz - strlen(out) - 1);
+		strncat(out, t, outsz - strlen(out) - 1);
 	}
 }
 
 /* Custom single-line row renderer: name (left, ellipsised) + value (right,
- * tinted by `value_col`). Rows aren't individually selectable in the park
- * view — the MenuLayer is used purely for its scrolling — so we don't draw
- * any selection highlight. */
+ * tinted by `value_col`). The highlighted row renders on the MenuLayer's
+ * blue selection background with all-white text — it's the target of the
+ * long-press favourite gesture, so the user needs to see where the cursor
+ * is. */
 /* Round-display text flow attributes — allocated lazily so we don't
  * build and tear down the GTextAttributes on every row redraw. On
  * rectangular displays this stays NULL and graphics_draw_text renders
@@ -217,13 +251,17 @@ static GTextAttributes *round_attrs(void)
 /* Fill the row's background with either the zebra stripe tint (odd rows)
  * or plain white (even rows). We paint this ourselves so the alternating
  * pattern shows through — MenuLayer's normal/highlight colours can only
- * set one flat background per row. */
-static void fill_row_bg(GContext *gctx, const Layer *cell, uint16_t row)
+ * set one flat background per row. Highlighted rows keep the MenuLayer's
+ * selection colour (painted before we're called), so we skip the stripe
+ * and return true so callers switch the text to the selected palette. */
+static bool fill_row_bg(GContext *gctx, const Layer *cell, uint16_t row)
 {
+	if (menu_cell_layer_is_highlighted(cell)) return true;
 	GRect b = layer_get_bounds(cell);
 	GColor bg = (row & 1) ? COL_ROW_STRIPE : GColorWhite;
 	graphics_context_set_fill_color(gctx, bg);
 	graphics_fill_rect(gctx, b, 0, GCornerNone);
+	return false;
 }
 
 /* Two-line renderer for Shows rows: name on top (bold 18), times on the
@@ -233,7 +271,7 @@ static void draw_row_stacked(GContext *gctx, const Layer *cell,
                              const char *name, const char *times,
                              bool fav, uint16_t row)
 {
-	fill_row_bg(gctx, cell, row);
+	bool selected = fill_row_bg(gctx, cell, row);
 
 	GRect b = layer_get_bounds(cell);
 	const int PAD = PBL_IF_ROUND_ELSE(10, 4);
@@ -248,7 +286,8 @@ static void draw_row_stacked(GContext *gctx, const Layer *cell,
 	if (fav) snprintf(title, sizeof(title), "* %s", name);
 	else { strncpy(title, name, sizeof(title) - 1); title[sizeof(title) - 1] = '\0'; }
 
-	graphics_context_set_text_color(gctx, COL_ROW_FG);
+	graphics_context_set_text_color(gctx,
+		selected ? COL_ROW_SELECTED_FG : COL_ROW_FG);
 	graphics_draw_text(gctx, title,
 		fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
 		GRect(b.origin.x + PAD, b.origin.y - 2,
@@ -256,7 +295,8 @@ static void draw_row_stacked(GContext *gctx, const Layer *cell,
 		GTextOverflowModeTrailingEllipsis,
 		GTextAlignmentLeft, attrs);
 
-	graphics_context_set_text_color(gctx, COL_WAIT_DIM);
+	graphics_context_set_text_color(gctx,
+		selected ? COL_ROW_SELECTED_FG : COL_WAIT_DIM);
 	graphics_draw_text(gctx, times,
 		fonts_get_system_font(FONT_KEY_GOTHIC_14),
 		GRect(b.origin.x + PAD, b.origin.y + 20,
@@ -280,7 +320,7 @@ static void draw_row_inline(GContext *gctx, const Layer *cell,
                             const char *name, const char *value, bool fav,
                             GColor value_col, uint16_t row)
 {
-	fill_row_bg(gctx, cell, row);
+	bool selected = fill_row_bg(gctx, cell, row);
 
 	GRect b = layer_get_bounds(cell);
 	const int VALUE_W = 56;
@@ -303,7 +343,8 @@ static void draw_row_inline(GContext *gctx, const Layer *cell,
 	GTextAttributes *attrs = NULL;
 #endif
 
-	graphics_context_set_text_color(gctx, COL_ROW_FG);
+	graphics_context_set_text_color(gctx,
+		selected ? COL_ROW_SELECTED_FG : COL_ROW_FG);
 	graphics_draw_text(gctx, title, name_font,
 		GRect(b.origin.x + PAD, b.origin.y,
 		      b.size.w - VALUE_W - PAD * 2, b.size.h),
@@ -313,7 +354,10 @@ static void draw_row_inline(GContext *gctx, const Layer *cell,
 	/* Gothic 14 sits ~2px higher than 18 visually; bump status y a
 	 * little so it aligns with the name baseline. */
 	int value_y = b.origin.y + (is_status_text(value) ? 4 : 0);
-	graphics_context_set_text_color(gctx, value_col);
+	/* Traffic-light tints are unreadable on the blue highlight — the
+	 * selected row's value goes white like the rest of its text. */
+	graphics_context_set_text_color(gctx,
+		selected ? COL_ROW_SELECTED_FG : value_col);
 	graphics_draw_text(gctx, value, value_font,
 		GRect(b.origin.x + b.size.w - VALUE_W - PAD, value_y,
 		      VALUE_W, b.size.h),
@@ -381,12 +425,31 @@ static void set_header_collapsed(bool collapse)
 	}
 }
 
+static void remember_selection(void)
+{
+	if (!s_menu || s_sorted_count == 0) {
+		s_selected_id[0] = '\0';
+		return;
+	}
+	MenuIndex idx = menu_layer_get_selected_index(s_menu);
+	if (idx.row >= s_sorted_count) {
+		s_selected_id[0] = '\0';
+		return;
+	}
+	uint8_t pos = s_sorted[idx.row];
+	const char *id = (s_page == PAGE_WAITS)
+		? g_park.attractions[pos].id : g_park.shows[pos].id;
+	strncpy(s_selected_id, id, sizeof(s_selected_id) - 1);
+	s_selected_id[sizeof(s_selected_id) - 1] = '\0';
+}
+
 static void menu_selection_changed(MenuLayer *l, MenuIndex new_idx,
                                    MenuIndex old_idx, void *ctx)
 {
 	/* Any row past the first triggers the collapse. Coming back to row 0
 	 * restores the full header so the park name + hours are visible. */
 	set_header_collapsed(new_idx.row > 0);
+	remember_selection();
 }
 
 static void resort(void)
@@ -429,6 +492,7 @@ static void switch_page(page_t p)
 	}
 	/* Back to row 0 — re-show the header. */
 	set_header_collapsed(false);
+	remember_selection();
 }
 
 /* Jump selection by PAGE_STEP rows, clamped to the list bounds. */
@@ -462,6 +526,39 @@ static void select_handler(ClickRecognizerRef ref, void *ctx)
 	}
 }
 
+/* Long-press SELECT: toggle favourite on the highlighted row, in place.
+ * This is the fast path for the app's most common personalisation action
+ * — the settings round-trip (Shows → Settings → Fave list → find ride)
+ * still works but is no longer required. The short vibe confirms the
+ * toggle; the animated re-sort shows the row jumping to (or leaving)
+ * the pinned favourites bucket, with the cursor following it. */
+static void long_select_handler(ClickRecognizerRef ref, void *ctx)
+{
+	if (!s_menu || s_sorted_count == 0) return;
+	MenuIndex idx = menu_layer_get_selected_index(s_menu);
+	if (idx.row >= s_sorted_count) return;
+	uint8_t pos = s_sorted[idx.row];
+	const char *id = (s_page == PAGE_WAITS)
+		? g_park.attractions[pos].id : g_park.shows[pos].id;
+	fav_list_kind_t kind = (s_page == PAGE_WAITS)
+		? FAV_ATTRACTIONS : FAV_SHOWS;
+
+	storage_toggle_favourite(s_park_id, kind, id);
+	vibes_short_pulse();
+	/* Same marker format as settings_view.c — integration tests grep it. */
+	APP_LOG(APP_LOG_LEVEL_INFO, "SV toggle %s %s", id,
+	        storage_is_favourite(s_park_id, kind, id) ? "ON" : "OFF");
+
+	resort();
+	int row = sort_find_id(s_sorted, s_sorted_count, kind, id);
+	if (row < 0) row = 0;
+	menu_layer_set_selected_index(s_menu,
+	                              (MenuIndex){.section = 0, .row = (uint16_t)row},
+	                              MenuRowAlignCenter, true);
+	set_header_collapsed(row > 0);
+	remember_selection();
+}
+
 static void back_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (s_page == PAGE_SHOWS) {
@@ -473,10 +570,14 @@ static void back_handler(ClickRecognizerRef ref, void *ctx)
 
 static void click_config(Window *w)
 {
-	/* Handle all 4 buttons ourselves. Up/Down scroll the menu manually. */
+	/* Handle all 4 buttons ourselves. Up/Down scroll the menu manually.
+	 * With a long-click subscription in place, the plain SELECT click
+	 * fires on release (before the 500ms threshold) — page switching
+	 * keeps working unchanged. */
 	window_single_click_subscribe(BUTTON_ID_UP, up_handler);
 	window_single_click_subscribe(BUTTON_ID_DOWN, down_handler);
 	window_single_click_subscribe(BUTTON_ID_SELECT, select_handler);
+	window_long_click_subscribe(BUTTON_ID_SELECT, 500, long_select_handler, NULL);
 	window_single_click_subscribe(BUTTON_ID_BACK, back_handler);
 }
 
@@ -495,6 +596,9 @@ static void on_minute_tick(struct tm *tick_time, TimeUnits units_changed)
 static void window_appear(Window *w)
 {
 	resort();
+	/* Rows may have moved (favourites toggled in settings) — re-sync the
+	 * remembered cursor id with whatever the cursor now sits on. */
+	remember_selection();
 	tick_timer_service_subscribe(MINUTE_UNIT, on_minute_tick);
 }
 
@@ -519,9 +623,8 @@ static void window_load(Window *w)
 	layer_set_update_proc(s_tabs, tabs_update_proc);
 	layer_add_child(root, s_tabs);
 
-	/* Menu: rows. Rows aren't individually selectable — MenuLayer is used
-	 * for its scrolling. Highlight colours match normal colours so no
-	 * selection indicator is drawn. */
+	/* Menu: rows. The cursor row is visibly highlighted — it's the
+	 * target of the long-press favourite gesture. */
 	s_menu = menu_layer_create(GRect(0, HEADER_HEIGHT + TAB_HEIGHT,
 	                                 bounds.size.w,
 	                                 bounds.size.h - HEADER_HEIGHT - TAB_HEIGHT));
@@ -534,8 +637,8 @@ static void window_load(Window *w)
 	};
 	menu_layer_set_callbacks(s_menu, NULL, cbs);
 #ifdef PBL_COLOR
-	/* Matching highlight and normal colours hides the selection indicator. */
-	menu_layer_set_highlight_colors(s_menu, GColorWhite, COL_ROW_FG);
+	menu_layer_set_highlight_colors(s_menu,
+		COL_ROW_SELECTED_BG, COL_ROW_SELECTED_FG);
 	menu_layer_set_normal_colors(s_menu, GColorWhite, COL_ROW_FG);
 #endif
 #ifdef PBL_ROUND
@@ -602,4 +705,35 @@ void park_view_data_changed(void)
 		                              MenuRowAlignTop, false);
 	}
 	set_header_collapsed(false);
+	remember_selection();
+}
+
+void park_view_refresh(void)
+{
+	/* Background refresh — g_park was just re-parsed. Unlike
+	 * park_view_data_changed(), the user keeps their place: same page,
+	 * cursor back on the same ride/show (found by id, since the re-sort
+	 * can move every row as waits change). No window-stack changes, so
+	 * this is safe to call while settings sits on top. */
+	MenuIndex before = s_menu ? menu_layer_get_selected_index(s_menu)
+	                          : (MenuIndex){ .section = 0, .row = 0 };
+	resort();
+	if (!s_menu) return;
+
+	int target = sort_find_id(s_sorted, s_sorted_count,
+	                          (s_page == PAGE_WAITS) ? FAV_ATTRACTIONS : FAV_SHOWS,
+	                          s_selected_id);
+	if (target < 0) {
+		/* Row vanished (e.g. show ran out of times) — stay near where the
+		 * cursor was, clamped into the new list. */
+		target = before.row;
+		if (s_sorted_count == 0) target = 0;
+		else if (target >= s_sorted_count) target = s_sorted_count - 1;
+	}
+	menu_layer_set_selected_index(s_menu,
+	                              (MenuIndex){.section = 0, .row = (uint16_t)target},
+	                              MenuRowAlignCenter, false);
+	set_header_collapsed(target > 0);
+	remember_selection();
+	APP_LOG(APP_LOG_LEVEL_INFO, "PV refresh kept row %d", target);
 }

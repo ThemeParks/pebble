@@ -13,4 +13,9 @@ void park_view_show(const char *park_id,
                     park_view_back_cb_t on_back,
                     park_view_settings_cb_t on_settings);
 void park_view_hide(void);
-void park_view_data_changed(void);   /* re-sort + re-render */
+void park_view_data_changed(void);
+
+/* Background-refresh variant of park_view_data_changed(): re-sorts with
+ * the fresh g_park contents but preserves the user's page and cursor
+ * position (matched by entity id). Never touches the window stack. */
+void park_view_refresh(void);   /* re-sort + re-render */

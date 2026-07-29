@@ -16,6 +16,39 @@ static loading_retry_cb_t s_on_retry = NULL;
 static loading_back_cb_t s_on_back = NULL;
 static bool s_is_error = false;
 
+/* Animated trailing dots while loading ("Loading\nMagic Kingdom", then
+ * ".", "..", "..." cycling). Cheap reassurance that the app hasn't hung
+ * — the fetch watchdog handles the case where it actually has. Error
+ * screens are static: their text is an instruction, not a wait. */
+#define DOTS_INTERVAL_MS 400
+static char s_base_text[112];
+static AppTimer *s_dots_timer = NULL;
+static int s_dots = 0;
+
+static void dots_tick(void *ctx)
+{
+	s_dots = (s_dots % 3) + 1;
+	snprintf(s_text, sizeof(s_text), "%s%.*s", s_base_text, s_dots, "...");
+	if (s_label) text_layer_set_text(s_label, s_text);
+	s_dots_timer = app_timer_register(DOTS_INTERVAL_MS, dots_tick, NULL);
+}
+
+static void dots_stop(void)
+{
+	if (s_dots_timer) {
+		app_timer_cancel(s_dots_timer);
+		s_dots_timer = NULL;
+	}
+}
+
+static void dots_start(void)
+{
+	dots_stop();
+	s_dots = 3;   /* start fully-dotted so the text doesn't jump */
+	snprintf(s_text, sizeof(s_text), "%s...", s_base_text);
+	s_dots_timer = app_timer_register(DOTS_INTERVAL_MS, dots_tick, NULL);
+}
+
 static void select_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (s_is_error && s_on_retry) s_on_retry();
@@ -75,12 +108,13 @@ static void ensure_window(void)
 
 void loading_view_show(const char *park_name, loading_back_cb_t on_back)
 {
-	snprintf(s_text, sizeof(s_text), "Loading\n%s...",
+	snprintf(s_base_text, sizeof(s_base_text), "Loading\n%s",
 	         park_name ? park_name : "");
 	s_is_error = false;
 	s_on_retry = NULL;
 	s_on_back = on_back;
 	ensure_window();
+	dots_start();
 	if (s_label) text_layer_set_text(s_label, s_text);
 }
 
@@ -88,6 +122,7 @@ void loading_view_show_error(const char *park_name,
                              loading_retry_cb_t on_retry,
                              loading_back_cb_t on_back)
 {
+	dots_stop();
 	snprintf(s_text, sizeof(s_text),
 	         "Couldn't load\n%s\n\nSELECT to retry\nBACK for parks",
 	         park_name ? park_name : "this park");
@@ -101,6 +136,7 @@ void loading_view_show_error(const char *park_name,
 void loading_view_show_disconnected(loading_retry_cb_t on_retry,
                                     loading_back_cb_t on_back)
 {
+	dots_stop();
 	snprintf(s_text, sizeof(s_text),
 	         "Phone not\nconnected\n\nSELECT to retry\nBACK for parks");
 	s_is_error = true;
@@ -112,5 +148,6 @@ void loading_view_show_disconnected(loading_retry_cb_t on_retry,
 
 void loading_view_hide(void)
 {
+	dots_stop();
 	if (s_window) window_stack_remove(s_window, false);
 }
