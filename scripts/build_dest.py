@@ -333,6 +333,18 @@ def main() -> int:
 
     pbw_out: Optional[Path] = None
     if args.install or args.build:
+        # Two hard-won landmines guarded here:
+        #  * pebble-tool's `pebble build` exits 0 even when waf FAILS, so a
+        #    previous successful build's .pbw would get copied as if fresh.
+        #    Deleting the artifacts first makes a failed build unmissable.
+        #  * message_keys.auto.h is only generated at waf *configure* time,
+        #    so a messageKeys addition in package.json silently never
+        #    reaches C code on incremental builds. `pebble clean` forces a
+        #    reconfigure. (Slower, but a wrong binary is far more expensive
+        #    than a rebuild.)
+        for stale in (dest_dir / "build").glob("*.pbw"):
+            stale.unlink()
+        pebble(["pebble", "clean"], dest_dir)   # rc ignored: no-op pre-first-build
         if pebble(["pebble", "build"], dest_dir) != 0:
             return 1
         # Copy the built .pbw into builds/<slug>.pbw so every
