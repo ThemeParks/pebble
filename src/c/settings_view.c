@@ -10,9 +10,9 @@
 #include "storage.h"
 #include "config.h"
 #include "colours.h"
+#include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
-#include <ctype.h>
 
 typedef enum {
 	SUB_MAIN = 0,
@@ -277,99 +277,20 @@ static void back_handler(ClickRecognizerRef ref, void *ctx)
 	}
 }
 
-/* Double-tap detection for letter-jump in the favourites lists. On the
- * second rapid press of Up/Down (within DOUBLE_TAP_MS) we jump to the
- * start of the previous/next letter bucket. Any longer gap is a normal
- * single-row move. */
-#define DOUBLE_TAP_MS 400
-
-static uint32_t s_last_up_ms = 0;
-static uint32_t s_last_down_ms = 0;
-
-static uint32_t now_ms(void)
-{
-	time_t s; uint16_t ms;
-	time_ms(&s, &ms);
-	return (uint32_t)s * 1000u + ms;
-}
-
-static bool in_fav_list(void)
-{
-	return s_sub == SUB_FAV_ATTR || s_sub == SUB_FAV_SHOWS;
-}
-
-/* Given row index `from`, walk `direction` (+1 / -1) until we hit a row
- * whose name starts with a different letter, then keep going until the
- * letter changes AGAIN or we run out. The result is the first row of the
- * adjacent letter bucket. */
-static char letter_at(uint16_t row)
-{
-	if (!in_fav_list()) return '\0';
-	uint8_t pos = s_fav_idx[row];
-	const char *name = (s_sub == SUB_FAV_ATTR)
-		? g_park.attractions[pos].name
-		: g_park.shows[pos].name;
-	return (name && name[0]) ? (char)toupper((unsigned char)name[0]) : '\0';
-}
-
-static uint16_t jump_letter(uint16_t from, int direction)
-{
-	if (!in_fav_list() || s_fav_count == 0) return from;
-	char cur = letter_at(from);
-	int i = (int)from;
-
-	/* Skip rows with the current letter */
-	while (i + direction >= 0 && i + direction < (int)s_fav_count
-	       && letter_at((uint16_t)(i + direction)) == cur) {
-		i += direction;
-	}
-	/* Step onto the first row of the new letter (if there is one) */
-	if (i + direction >= 0 && i + direction < (int)s_fav_count) {
-		i += direction;
-	} else {
-		return from;   /* no next bucket — stay put */
-	}
-
-	/* If going backwards we've landed on the LAST row of the previous
-	 * letter — walk back to its first row. */
-	if (direction < 0) {
-		char landed = letter_at((uint16_t)i);
-		while (i > 0 && letter_at((uint16_t)(i - 1)) == landed) i--;
-	}
-
-	return (uint16_t)i;
-}
-
+/* UP/DOWN: one row per press, repeating while held (ui_common.h). The
+ * old double-tap letter jump is gone on purpose — it hijacked two quick
+ * presses (meaning "two rows") into a bucket jump, and it blocked
+ * hold-to-repeat, which is the faster way through a 40-entry list. */
 static void up_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (!s_menu) return;
-	uint32_t now = now_ms();
-	if (in_fav_list() && now - s_last_up_ms < DOUBLE_TAP_MS) {
-		MenuIndex cur = menu_layer_get_selected_index(s_menu);
-		uint16_t next = jump_letter(cur.row, -1);
-		menu_layer_set_selected_index(s_menu,
-			(MenuIndex){.section = 0, .row = next},
-			MenuRowAlignCenter, true);
-	} else {
-		menu_layer_set_selected_next(s_menu, true, MenuRowAlignCenter, true);
-	}
-	s_last_up_ms = now;
+	menu_layer_set_selected_next(s_menu, true, MenuRowAlignCenter, false);
 }
 
 static void down_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (!s_menu) return;
-	uint32_t now = now_ms();
-	if (in_fav_list() && now - s_last_down_ms < DOUBLE_TAP_MS) {
-		MenuIndex cur = menu_layer_get_selected_index(s_menu);
-		uint16_t next = jump_letter(cur.row, +1);
-		menu_layer_set_selected_index(s_menu,
-			(MenuIndex){.section = 0, .row = next},
-			MenuRowAlignCenter, true);
-	} else {
-		menu_layer_set_selected_next(s_menu, false, MenuRowAlignCenter, true);
-	}
-	s_last_down_ms = now;
+	menu_layer_set_selected_next(s_menu, false, MenuRowAlignCenter, false);
 }
 
 static void select_click_handler(ClickRecognizerRef ref, void *ctx)
@@ -381,8 +302,8 @@ static void select_click_handler(ClickRecognizerRef ref, void *ctx)
 
 static void click_config(Window *w)
 {
-	window_single_click_subscribe(BUTTON_ID_UP, up_handler);
-	window_single_click_subscribe(BUTTON_ID_DOWN, down_handler);
+	window_single_repeating_click_subscribe(BUTTON_ID_UP, SCROLL_REPEAT_MS, up_handler);
+	window_single_repeating_click_subscribe(BUTTON_ID_DOWN, SCROLL_REPEAT_MS, down_handler);
 	window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
 	window_single_click_subscribe(BUTTON_ID_BACK, back_handler);
 }

@@ -17,6 +17,7 @@
 #include "config.h"
 #include "colours.h"
 #include "format.h"
+#include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
 
@@ -33,13 +34,9 @@
 #define ROW_HEIGHT_WAITS 26
 #define ROW_HEIGHT_SHOWS 42
 
-/* Up/Down move the cursor ONE row, repeating at this interval while
- * held — the cursor is the long-press-favourite target, so it must be
- * able to land on every ride, and held-repeat covers a 40-row list in
- * ~4s. Deliberately NO double-press jump: a multi-click subscription
- * makes the firmware delay every single click by the disambiguation
- * window (~300ms), which reads as input lag (device-tested). */
-#define SCROLL_REPEAT_MS 100
+/* Up/Down: one row per press, repeating while held — the cursor is the
+ * long-press-favourite target, so it must be able to land on every
+ * ride. Interaction rules live in ui_common.h. */
 
 typedef enum { PAGE_WAITS = 0, PAGE_SHOWS = 1 } page_t;
 
