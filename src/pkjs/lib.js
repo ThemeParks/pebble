@@ -281,6 +281,170 @@ function haversineDist(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ── Phone-side settings ──────────────────────────────────────────────────
+//
+// Settings JSON (localStorage "tpw_settings" and the webview's close
+// payload). Versioned from day one so later additions (My Parks, units
+// override, ...) migrate cleanly:
+//   { v: 1, glance: true, destMode: "watch"|"fixed", destId: null|"<uuid>" }
+// destMode/destId only mean anything in the uber build; per-destination
+// builds carry them inert.
+
+function defaultSettings() {
+  return { v: 1, glance: true, destMode: "watch", destId: null };
+}
+
+// Tolerant parse of a stored/returned settings JSON string. Unknown
+// fields are dropped, missing/mistyped fields get defaults, and any
+// garbage (bad JSON, non-object, null input) yields pure defaults — the
+// settings chain must never be able to wedge the app.
+function parseSettings(json) {
+  var s = defaultSettings();
+  var p = null;
+  try {
+    p = typeof json === "string" ? JSON.parse(json) : json;
+  } catch (e) {}
+  if (!p || typeof p !== "object") return s;
+  if (typeof p.v === "number" && isFinite(p.v)) s.v = p.v;
+  if (typeof p.glance === "boolean") s.glance = p.glance;
+  if (p.destMode === "watch" || p.destMode === "fixed") s.destMode = p.destMode;
+  if (typeof p.destId === "string" && p.destId) s.destId = p.destId;
+  // A fixed mode without a destination to fix on is meaningless — treat
+  // it as "watch" so PKJS never tries to serve a null destination.
+  if (s.destMode === "fixed" && !s.destId) s.destMode = "watch";
+  return s;
+}
+
+// Compact wire string pushed to the watch under SETTINGS_DATA. Format:
+// semicolon-separated key=value segments ("glance=1"); the watch parser
+// (settings_parse.c) ignores unknown segments, so future fields append
+// as ";key=value" without breaking older watch binaries. v1 only sends
+// what the watch needs: the glance flag (destMode is applied phone-side).
+function encodeSettingsPayload(settings) {
+  return "glance=" + (settings.glance ? "1" : "0");
+}
+
+// Minimal HTML escaping for text nodes and double-quoted attributes.
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Build the full self-contained config-page HTML (inline CSS/JS, no
+// external resources — the phone webview may be offline). `dests` is the
+// fetchDestList() result array ([] when unavailable); isUber gates the
+// Destination section. Page JS stays ES5 — some phone webviews are as
+// old as the PKJS interpreter.
+//
+// Save navigates to pebblejs://close#<encodeURIComponent(settings JSON)>;
+// Cancel navigates to pebblejs://close with no payload — index.js treats
+// an absent/empty e.response as "no change".
+function buildConfigPage(settings, dests, isUber) {
+  var h = [];
+  h.push("<!DOCTYPE html><html><head>");
+  h.push('<meta charset="utf-8">');
+  h.push('<meta name="viewport" content="width=device-width, initial-scale=1">');
+  h.push("<title>Theme Parks Settings</title>");
+  h.push("<style>");
+  h.push("body{font-family:sans-serif;margin:0;padding:16px;background:#f4f4f4;color:#222;}");
+  h.push("h1{font-size:1.3em;margin:0 0 12px;}");
+  h.push(".card{background:#fff;border-radius:6px;padding:12px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,0.15);}");
+  h.push(".card h2{font-size:1em;margin:0 0 8px;}");
+  h.push("label{display:block;margin:6px 0;}");
+  h.push("select{width:100%;margin-top:6px;}");
+  h.push(".hint{font-size:0.85em;color:#666;margin:6px 0 0;}");
+  h.push(".buttons{display:flex;gap:8px;}");
+  h.push("button{flex:1;padding:10px;font-size:1em;border:0;border-radius:6px;}");
+  h.push("#save{background:#f9a825;color:#222;font-weight:bold;}");
+  h.push("#cancel{background:#ddd;color:#222;}");
+  h.push("</style></head><body>");
+  h.push("<h1>Theme Parks Settings</h1>");
+
+  // AppGlance toggle
+  h.push('<div class="card"><h2>Launcher</h2>');
+  h.push('<label><input type="checkbox" id="glance"'
+         + (settings.glance ? " checked" : "") + "> Show park info in the launcher (AppGlance)</label>");
+  h.push("</div>");
+
+  if (isUber) {
+    var haveDests = dests && dests.length > 0;
+    var fixed = settings.destMode === "fixed" && haveDests;
+    h.push('<div class="card"><h2>Destination</h2>');
+    h.push('<label><input type="radio" name="destmode" value="watch"'
+           + (fixed ? "" : " checked") + "> Choose on watch</label>");
+    h.push('<label><input type="radio" name="destmode" value="fixed"'
+           + (fixed ? " checked" : "") + (haveDests ? "" : " disabled")
+           + "> Fixed destination</label>");
+    if (haveDests) {
+      // Group by region (same buckets as the watch's destination picker);
+      // location-less destinations go under "Other" rather than being
+      // dropped — a user must be able to fix on any destination the watch
+      // could reach. Alphabetical groups; "Other" happens to sort last.
+      var groups = {};
+      for (var i = 0; i < dests.length; i++) {
+        var d = dests[i];
+        var region = (d.lat == null || d.lon == null)
+          ? "Other" : classifyRegion(d.lat, d.lon);
+        if (!groups[region]) groups[region] = [];
+        groups[region].push(d);
+      }
+      var names = Object.keys(groups).sort();
+      h.push('<select id="destid"' + (fixed ? "" : " disabled") + ">");
+      for (var g = 0; g < names.length; g++) {
+        h.push('<optgroup label="' + escapeHtml(names[g]) + '">');
+        var gd = groups[names[g]];
+        gd.sort(function (a, b) {
+          if (a.name < b.name) return -1;
+          if (a.name > b.name) return 1;
+          return 0;
+        });
+        for (var j = 0; j < gd.length; j++) {
+          h.push('<option value="' + escapeHtml(gd[j].id) + '"'
+                 + (settings.destId === gd[j].id ? " selected" : "") + ">"
+                 + escapeHtml(gd[j].name) + "</option>");
+        }
+        h.push("</optgroup>");
+      }
+      h.push("</select>");
+    } else {
+      h.push('<p class="hint">Destination list unavailable — check the phone\'s '
+             + "internet connection and reopen this page.</p>");
+    }
+    h.push("</div>");
+  }
+
+  h.push('<div class="buttons">');
+  h.push('<button id="cancel" type="button">Cancel</button>');
+  h.push('<button id="save" type="button">Save</button>');
+  h.push("</div>");
+
+  // Page JS — ES5 only. Reads the controls back into the settings JSON
+  // and hands it to PKJS via the pebblejs://close hash.
+  h.push("<script>");
+  h.push("function radioVal(name){var r=document.getElementsByName(name);"
+         + "for(var i=0;i<r.length;i++){if(r[i].checked)return r[i].value;}return null;}");
+  h.push("function setDestEnabled(){var s=document.getElementById('destid');"
+         + "if(s){s.disabled=radioVal('destmode')!=='fixed';}}");
+  h.push("var radios=document.getElementsByName('destmode');"
+         + "for(var i=0;i<radios.length;i++){radios[i].onchange=setDestEnabled;}");
+  h.push("document.getElementById('cancel').onclick=function(){"
+         + "document.location='pebblejs://close';};");
+  h.push("document.getElementById('save').onclick=function(){"
+         + "var s={v:1};"
+         + "s.glance=document.getElementById('glance').checked;"
+         + "var mode=radioVal('destmode');"
+         + "var sel=document.getElementById('destid');"
+         + "s.destMode=(mode==='fixed'&&sel&&sel.value)?'fixed':'watch';"
+         + "s.destId=(s.destMode==='fixed')?sel.value:null;"
+         + "document.location='pebblejs://close#'+encodeURIComponent(JSON.stringify(s));};");
+  h.push("</" + "script>");
+  h.push("</body></html>");
+  return h.join("");
+}
+
 // nowMs is optional (defaults to Date.now()) so tests can pin time.
 function filterLiveData(liveData, nowMs) {
   const attractions = [];
@@ -337,4 +501,9 @@ module.exports = {
   haversineDist: haversineDist,
   buildDestLines: buildDestLines,
   filterLiveData: filterLiveData,
+  defaultSettings: defaultSettings,
+  parseSettings: parseSettings,
+  encodeSettingsPayload: encodeSettingsPayload,
+  escapeHtml: escapeHtml,
+  buildConfigPage: buildConfigPage,
 };

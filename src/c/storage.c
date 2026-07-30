@@ -4,6 +4,7 @@
  * Persist key layout:
  *   1                  : sort_mode (uint32)
  *   2                  : last_park (string, park UUID)
+ *   3                  : glance_enabled (int 0/1; absent = enabled)
  *   1000 + parkSlot*2 + listKind : favourites array (MAX_FAVS_PER_LIST * FAV_ID_LEN bytes)
  *
  * parkSlot is the park's index in g_parks (0..3). We avoid hashing the
@@ -16,6 +17,7 @@
 
 #define KEY_SORT_MODE 1
 #define KEY_LAST_PARK 2
+#define KEY_GLANCE_ENABLED 3
 #define KEY_FAV_BASE 1000
 /* Hours stored as "open|close" in one persist slot per park. */
 #define KEY_HOURS_BASE 2000
@@ -90,7 +92,37 @@ static int fav_key(int slot, fav_list_kind_t list_kind)
 	return KEY_FAV_BASE + slot * 2 + list_kind;
 }
 
-void storage_init(void) {}
+/* Glance flag cache: -1 = not read yet, else 0/1. It's only read on the
+ * deinit path (publish_glance), so a simple lazy read suffices — the
+ * cache mostly spares repeat reads within one exit. */
+static int8_t s_glance_cache = -1;
+
+void storage_init(void)
+{
+	/* Statics are zeroed on every real launch; the unit-test binaries
+	 * run many cases in one process, so reset_all() calls this to re-arm
+	 * the lazy caches as if freshly launched. */
+	s_glance_cache = -1;
+}
+
+bool storage_get_glance_enabled(void)
+{
+	if (s_glance_cache < 0) {
+		/* Default enabled when never set — the glance predates this
+		 * toggle, so upgrading users keep the behaviour they had. */
+		s_glance_cache = 1;
+		if (persist_exists(KEY_GLANCE_ENABLED)) {
+			s_glance_cache = persist_read_int(KEY_GLANCE_ENABLED) ? 1 : 0;
+		}
+	}
+	return s_glance_cache == 1;
+}
+
+void storage_set_glance_enabled(bool enabled)
+{
+	persist_write_int(KEY_GLANCE_ENABLED, enabled ? 1 : 0);
+	s_glance_cache = enabled ? 1 : 0;
+}
 
 sort_mode_t storage_get_sort_mode(void)
 {

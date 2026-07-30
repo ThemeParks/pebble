@@ -11,18 +11,21 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Mirrors KEY_SORT_MODE in storage.c — needed to plant a raw bad value. */
+/* Mirror storage.c's raw keys — needed to plant/inspect raw values. */
 #define RAW_KEY_SORT_MODE 1
+#define RAW_KEY_GLANCE_ENABLED 3
 
 #define PARK0 (g_parks[0].id)
 #define PARK1 (g_parks[1].id)
 
 /* storage.c keeps RAM caches over persist; wiping the stub alone would
- * leave stale cache entries bleeding between tests. */
+ * leave stale cache entries bleeding between tests. storage_init()
+ * re-arms the lazy caches that aren't park-scoped (glance flag). */
 static void reset_all(void)
 {
 	persist_stub_reset();
 	storage_on_parks_changed();
+	storage_init();
 }
 
 static void test_sort_mode_default(void)
@@ -144,6 +147,53 @@ static void test_park_hours_roundtrip(void)
 	ASSERT_EQ_STR("9:00 AM", open);
 }
 
+static void test_glance_enabled_default(void)
+{
+	/* Never set → enabled: the glance predates the toggle, so upgrading
+	 * users keep the behaviour they had. */
+	reset_all();
+	ASSERT_TRUE(storage_get_glance_enabled());
+}
+
+static void test_glance_enabled_roundtrip(void)
+{
+	reset_all();
+	storage_set_glance_enabled(false);
+	ASSERT_TRUE(!storage_get_glance_enabled());
+	storage_set_glance_enabled(true);
+	ASSERT_TRUE(storage_get_glance_enabled());
+}
+
+static void test_glance_enabled_persists(void)
+{
+	/* The set must write through immediately — verified by re-arming the
+	 * lazy cache (simulated relaunch) and re-reading from persist. */
+	reset_all();
+	storage_set_glance_enabled(false);
+	storage_init();   /* forget the RAM cache */
+	ASSERT_TRUE(!storage_get_glance_enabled());
+
+	/* Raw persisted value survives too, and nonzero reads as enabled. */
+	ASSERT_EQ_INT(0, persist_read_int(RAW_KEY_GLANCE_ENABLED));
+	persist_write_int(RAW_KEY_GLANCE_ENABLED, 7);
+	storage_init();
+	ASSERT_TRUE(storage_get_glance_enabled());
+}
+
+static void test_glance_reads_stay_in_ram(void)
+{
+	/* Lazy cache contract: one persist read on first query, then RAM. */
+	reset_all();
+	storage_set_glance_enabled(false);
+	storage_init();
+	storage_get_glance_enabled();   /* warm */
+	int before = persist_stub_read_count();
+	for (int i = 0; i < 50; i++) {
+		storage_get_glance_enabled();
+	}
+	ASSERT_EQ_INT(before, persist_stub_read_count());
+}
+
 static void test_last_park(void)
 {
 	reset_all();
@@ -235,6 +285,10 @@ int main(void)
 	RUN_TEST(test_favourites_full_replaces_last);
 	RUN_TEST(test_unknown_park_safe_defaults);
 	RUN_TEST(test_park_hours_roundtrip);
+	RUN_TEST(test_glance_enabled_default);
+	RUN_TEST(test_glance_enabled_roundtrip);
+	RUN_TEST(test_glance_enabled_persists);
+	RUN_TEST(test_glance_reads_stay_in_ram);
 	RUN_TEST(test_last_park);
 	RUN_TEST(test_fav_queries_stay_in_ram);
 	RUN_TEST(test_hours_queries_stay_in_ram);

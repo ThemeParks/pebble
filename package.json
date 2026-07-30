@@ -20,6 +20,9 @@
     "watchapp": {
       "watchface": false
     },
+    "capabilities": [
+      "configurable"
+    ],
     "messageKeys": [
       "REQUEST_PARK_ID",
       "PARK_DATA_JSON",
@@ -31,7 +34,8 @@
       "DEST_PARKS_DATA",
       "CHUNK_INDEX",
       "CHUNK_MORE",
-      "REQUEST_FORCE"
+      "REQUEST_FORCE",
+      "SETTINGS_DATA"
     ],
     "resources": {
       "media": []

@@ -454,6 +454,156 @@ test("filterLiveData shows keep only future times, max 4", function () {
   assert.deepStrictEqual(out.h[1][3], []);
 });
 
+// ── parseSettings / defaultSettings ──────────────────────────────────────
+
+test("defaultSettings shape", function () {
+  assert.deepStrictEqual(lib.defaultSettings(),
+    { v: 1, glance: true, destMode: "watch", destId: null });
+});
+
+test("parseSettings garbage yields defaults", function () {
+  var def = lib.defaultSettings();
+  assert.deepStrictEqual(lib.parseSettings(null), def);
+  assert.deepStrictEqual(lib.parseSettings(undefined), def);
+  assert.deepStrictEqual(lib.parseSettings(""), def);
+  assert.deepStrictEqual(lib.parseSettings("not json {"), def);
+  assert.deepStrictEqual(lib.parseSettings("42"), def);
+  assert.deepStrictEqual(lib.parseSettings("null"), def);
+  assert.deepStrictEqual(lib.parseSettings('"a string"'), def);
+});
+
+test("parseSettings full round-trip", function () {
+  var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw" };
+  assert.deepStrictEqual(lib.parseSettings(JSON.stringify(s)), s);
+});
+
+test("parseSettings partials get defaults", function () {
+  var got = lib.parseSettings('{"glance":false}');
+  assert.deepStrictEqual(got,
+    { v: 1, glance: false, destMode: "watch", destId: null });
+});
+
+test("parseSettings mistyped fields fall back", function () {
+  var got = lib.parseSettings(
+    '{"glance":"yes","destMode":"banana","destId":123,"v":"x"}');
+  assert.deepStrictEqual(got, lib.defaultSettings());
+});
+
+test("parseSettings unknown fields dropped", function () {
+  var got = lib.parseSettings('{"glance":false,"myParks":["a","b"],"zzz":1}');
+  assert.strictEqual(got.myParks, undefined);
+  assert.strictEqual(got.zzz, undefined);
+  assert.strictEqual(got.glance, false);
+});
+
+test("parseSettings version passthrough", function () {
+  // A newer schema version must survive parse untouched so a future
+  // migration can see what it's migrating from.
+  assert.strictEqual(lib.parseSettings('{"v":2}').v, 2);
+});
+
+test("parseSettings fixed without destId degrades to watch", function () {
+  var got = lib.parseSettings('{"destMode":"fixed"}');
+  assert.strictEqual(got.destMode, "watch");
+  assert.strictEqual(got.destId, null);
+  got = lib.parseSettings('{"destMode":"fixed","destId":""}');
+  assert.strictEqual(got.destMode, "watch");
+});
+
+// ── encodeSettingsPayload ────────────────────────────────────────────────
+
+test("encodeSettingsPayload both glance states", function () {
+  assert.strictEqual(
+    lib.encodeSettingsPayload(lib.defaultSettings()), "glance=1");
+  var s = lib.defaultSettings();
+  s.glance = false;
+  assert.strictEqual(lib.encodeSettingsPayload(s), "glance=0");
+});
+
+// ── buildConfigPage ──────────────────────────────────────────────────────
+
+var CONFIG_DESTS = [
+  { id: "dest-dlp", name: "Disneyland Paris", parkCount: 2, lat: 48.9, lon: 2.8 },
+  { id: "dest-wdw", name: "Walt Disney World", parkCount: 4, lat: 28.4, lon: -81.6 },
+  { id: "dest-adv", name: "Adventureland", parkCount: 1, lat: 41.6, lon: -93.5 },
+  { id: "dest-nol", name: "No Location Dest", parkCount: 1, lat: null, lon: null },
+];
+
+test("buildConfigPage non-uber: toggle present, no destination section", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), [], false);
+  assert.strictEqual(typeof html, "string");
+  assert.ok(html.indexOf('id="glance"') >= 0, "glance checkbox");
+  assert.ok(html.indexOf("pebblejs://close#") >= 0, "save URL");
+  assert.ok(html.indexOf("Destination") === -1, "no destination section");
+  // The page script is shared, so probe for the radio MARKUP, not the
+  // bare string "destmode".
+  assert.ok(html.indexOf('name="destmode"') === -1, "no destmode radios");
+});
+
+test("buildConfigPage uber: destination section with grouped select", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
+  assert.ok(html.indexOf('name="destmode"') >= 0, "destmode radios");
+  assert.ok(html.indexOf('value="watch"') >= 0);
+  assert.ok(html.indexOf('value="fixed"') >= 0);
+  // Region optgroups from classifyRegion; location-less dest lands in
+  // "Other" instead of being dropped. Groups alphabetical.
+  var eu = html.indexOf('<optgroup label="Europe">');
+  var na = html.indexOf('<optgroup label="North America">');
+  var other = html.indexOf('<optgroup label="Other">');
+  assert.ok(eu >= 0 && na >= 0 && other >= 0, "expected optgroups");
+  assert.ok(eu < na && na < other, "groups sorted alphabetically");
+  assert.ok(html.indexOf('value="dest-nol"') > other, "location-less in Other");
+  // Names sorted within a group: Adventureland before Walt Disney World.
+  var adv = html.indexOf('value="dest-adv"');
+  var wdw = html.indexOf('value="dest-wdw"');
+  assert.ok(na < adv && adv < wdw, "names sorted within group");
+});
+
+test("buildConfigPage prefills from current settings", function () {
+  // glance off + fixed WDW: checkbox unchecked, fixed radio checked,
+  // WDW option selected, select enabled.
+  var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw" };
+  var html = lib.buildConfigPage(s, CONFIG_DESTS, true);
+  assert.ok(html.indexOf('id="glance" checked') === -1, "glance unchecked");
+  assert.ok(/value="fixed" checked/.test(html), "fixed radio checked");
+  assert.ok(!/value="watch" checked/.test(html), "watch radio not checked");
+  assert.ok(html.indexOf('value="dest-wdw" selected') >= 0, "dest selected");
+  assert.ok(html.indexOf('id="destid" disabled') === -1, "select enabled");
+
+  // Defaults: glance checked, watch mode checked, select disabled.
+  var html2 = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
+  assert.ok(html2.indexOf('id="glance" checked') >= 0, "glance checked");
+  assert.ok(/value="watch" checked/.test(html2), "watch radio checked");
+  assert.ok(html2.indexOf('id="destid" disabled') >= 0, "select starts disabled");
+  assert.ok(html2.indexOf(" selected") === -1, "no option preselected");
+});
+
+test("buildConfigPage empty dest list disables fixed with hint", function () {
+  var s = { v: 1, glance: true, destMode: "fixed", destId: "dest-wdw" };
+  var html = lib.buildConfigPage(s, [], true);
+  assert.ok(/value="fixed"[^>]*disabled/.test(html), "fixed radio disabled");
+  assert.ok(html.indexOf('id="destid"') === -1, "no select rendered");
+  assert.ok(html.indexOf("Destination list unavailable") >= 0, "hint shown");
+  // Without a list to fix on, the checked mode falls back to watch.
+  assert.ok(/value="watch" checked/.test(html), "watch checked as fallback");
+});
+
+test("buildConfigPage escapes names", function () {
+  var dests = [{ id: 'x"><script>', name: "Bad & <Name>", parkCount: 1,
+                 lat: 28.4, lon: -81.6 }];
+  var html = lib.buildConfigPage(lib.defaultSettings(), dests, true);
+  assert.ok(html.indexOf("Bad &amp; &lt;Name&gt;") >= 0, "text escaped");
+  assert.ok(html.indexOf('value="x&quot;&gt;&lt;script&gt;"') >= 0, "attr escaped");
+});
+
+test("buildConfigPage is self-contained", function () {
+  // The phone webview may be offline: no external fetches allowed.
+  var html = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
+  assert.ok(html.indexOf("http://") === -1 && html.indexOf("https://") === -1,
+            "no external URLs");
+  assert.ok(html.indexOf("pebblejs://close") >= 0, "cancel URL present");
+});
+
 // ── summary ──────────────────────────────────────────────────────────────
 
 console.log(passed + " passed, " + failed + " failed");

@@ -10,6 +10,7 @@
 #include "config.h"
 #include "api.h"
 #include "parkdata.h"
+#include "settings_parse.h"
 #include "storage.h"
 #include "message_keys.auto.h"
 #include <string.h>
@@ -122,6 +123,18 @@ static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
 		parse_all_hours(buf, len);
 		return;
 	}
+	if (key == MESSAGE_KEY_SETTINGS_DATA) {
+		/* Phone-side settings push ("glance=0|1;..."). Fields the
+		 * payload doesn't carry keep their persisted values. */
+		settings_msg_t sm;
+		settings_parse(buf, len, &sm);
+		if (sm.has_glance) {
+			storage_set_glance_enabled(sm.glance);
+			APP_LOG(APP_LOG_LEVEL_INFO, "settings: glance %s",
+			        sm.glance ? "on" : "off");
+		}
+		return;
+	}
 #ifdef MULTI_DESTINATION
 	if (key == MESSAGE_KEY_DEST_LIST_DATA) {
 		/* List delivered — stop the re-request watchdog. An empty payload
@@ -136,6 +149,15 @@ static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
 		return;
 	}
 	if (key == MESSAGE_KEY_DEST_PARKS_DATA) {
+		/* Parks arriving means the request chain concluded — in fixed-
+		 * destination mode PKJS answers a dest-LIST request with the
+		 * fixed destination's parks and no DEST_LIST_DATA ever comes, so
+		 * the list watchdog must stand down here too or it would
+		 * re-request (and re-receive these parks) forever. */
+		if (s_dest_list_retry_timer) {
+			app_timer_cancel(s_dest_list_retry_timer);
+			s_dest_list_retry_timer = NULL;
+		}
 		if (s_dest_parks_cb) s_dest_parks_cb(buf, len);
 		return;
 	}
@@ -158,6 +180,10 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context)
 	if (!data) {
 		data = dict_find(iter, MESSAGE_KEY_ALL_HOURS_DATA);
 		data_key = MESSAGE_KEY_ALL_HOURS_DATA;
+	}
+	if (!data) {
+		data = dict_find(iter, MESSAGE_KEY_SETTINGS_DATA);
+		data_key = MESSAGE_KEY_SETTINGS_DATA;
 	}
 #ifdef MULTI_DESTINATION
 	if (!data) {

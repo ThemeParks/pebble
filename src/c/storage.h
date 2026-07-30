@@ -33,6 +33,11 @@ void storage_on_parks_changed(void);
 sort_mode_t storage_get_sort_mode(void);
 void storage_set_sort_mode(sort_mode_t mode);
 
+/* AppGlance on/off — set from the phone's config page (SETTINGS_DATA),
+ * read by publish_glance() on exit. Defaults to true when never set. */
+bool storage_get_glance_enabled(void);
+void storage_set_glance_enabled(bool enabled);
+
 const char *storage_get_last_park(void);   /* returns NULL if unset */
 void storage_set_last_park(const char *park_id);
 

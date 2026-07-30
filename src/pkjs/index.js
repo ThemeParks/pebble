@@ -25,6 +25,9 @@ var classifyRegion = lib.classifyRegion;
 var haversineDist = lib.haversineDist;
 var buildDestLines = lib.buildDestLines;
 var filterLiveData = lib.filterLiveData;
+var parseSettings = lib.parseSettings;
+var encodeSettingsPayload = lib.encodeSettingsPayload;
+var buildConfigPage = lib.buildConfigPage;
 
 function msgVal(payload, name) {
   if (payload[name] !== undefined) return payload[name];
@@ -54,8 +57,109 @@ var ALL_PARK_IDS = [
   "1c84a229-8862-4648-9c71-378ddd2c7693",   // Animal Kingdom
 ];
 
+// Uber-build flag, captured before any runtime reassignment of
+// DESTINATION_ID (handleDestSelect overwrites it once the user picks a
+// destination, so testing DESTINATION_ID directly later would lie).
+var IS_UBER = DESTINATION_ID === null;
+
 // In-memory cache. Persisted entries are loaded lazily on first request.
 const cache = {};
+
+// ── Phone-side settings (config page) ────────────────────────────────────
+
+var SETTINGS_KEY = "tpw_settings";
+
+// Fixed-destination mode serves the fixed destination's parks in place
+// of the FIRST dest-list answer of each session — see the appmessage
+// handler for why it must be once-only.
+var s_fixed_dest_served = false;
+
+function loadSettings() {
+  var raw = null;
+  try { raw = localStorage.getItem(SETTINGS_KEY); } catch (e) {}
+  return parseSettings(raw);
+}
+
+function saveSettings(settings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    console.log("PKJS: settings save failed - " + e.message);
+  }
+}
+
+// Push the compact settings payload (see lib.encodeSettingsPayload) to
+// the watch. It's a tiny single message — plain send with a couple of
+// retries, no chunking needed.
+function pushSettingsToWatch(settings) {
+  var payload = encodeSettingsPayload(settings);
+  function attempt(retriesLeft) {
+    var msg = {};
+    msg.SETTINGS_DATA = payload;
+    Pebble.sendAppMessage(
+      msg,
+      function () { console.log("PKJS: settings pushed (" + payload + ")"); },
+      function () {
+        if (retriesLeft > 0) {
+          setTimeout(function () { attempt(retriesLeft - 1); }, 500);
+        } else {
+          console.log("PKJS: settings push failed permanently");
+        }
+      }
+    );
+  }
+  attempt(2);
+}
+
+function openConfigPage(settings, dests) {
+  var html = buildConfigPage(settings, dests, IS_UBER);
+  Pebble.openURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+}
+
+Pebble.addEventListener("showConfiguration", function () {
+  var settings = loadSettings();
+  if (!IS_UBER) {
+    openConfigPage(settings, []);
+    return;
+  }
+  // Uber build: the destination dropdown needs the dest list (cached
+  // 24h). On failure open with an empty list — the page disables the
+  // fixed-destination option and shows a hint instead of never opening.
+  fetchDestList().then(function (dests) {
+    openConfigPage(settings, dests);
+  }).catch(function (err) {
+    console.log("PKJS: config dest list failed: " + err.message);
+    openConfigPage(settings, []);
+  });
+});
+
+Pebble.addEventListener("webviewclosed", function (e) {
+  if (!e || !e.response) {
+    console.log("PKJS: config page dismissed, no changes");
+    return;
+  }
+  var raw = e.response;
+  try { raw = decodeURIComponent(raw); } catch (err) {}
+  // parseSettings is garbage-tolerant, so a mangled payload degrades to
+  // defaults rather than throwing here.
+  var settings = parseSettings(raw);
+  saveSettings(settings);
+  console.log("PKJS: settings saved: " + JSON.stringify(settings));
+  pushSettingsToWatch(settings);
+  if (IS_UBER && settings.destMode === "fixed" && settings.destId) {
+    // Apply immediately: a running watch app gets the fixed
+    // destination's parks pushed right away (same path as a watch-side
+    // DEST_SELECT), instead of waiting for its next dest-list request.
+    // This push counts as the session's one fixed serve.
+    console.log("PKJS: applying fixed destination " + settings.destId);
+    s_fixed_dest_served = true;
+    handleDestSelect(settings.destId);
+  } else {
+    // Settings no longer fix a destination — re-arm so a later save
+    // back to fixed mode applies within the same session.
+    s_fixed_dest_served = false;
+  }
+});
 
 const DEST_CACHE_KEY = "tpw_dest_cache";
 const DEST_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -345,7 +449,13 @@ Pebble.addEventListener("ready", function () {
   msg.ERROR_MSG = "";
   Pebble.sendAppMessage(
     msg,
-    function () { console.log("PKJS: initial ready signal sent"); },
+    function () {
+      console.log("PKJS: initial ready signal sent");
+      // Follow with the settings payload so the watch persist stays in
+      // sync even when the user changed settings while the watch app was
+      // closed (the webviewclosed push only reaches a running app).
+      pushSettingsToWatch(loadSettings());
+    },
     function (e) { console.log("PKJS: initial send failed: " + JSON.stringify(e)); }
   );
 });
@@ -353,6 +463,30 @@ Pebble.addEventListener("ready", function () {
 Pebble.addEventListener("appmessage", function (e) {
   // Multi-destination: watch requesting destination list
   if (msgVal(e.payload, "DEST_LIST_DATA") != null) {
+    // Fixed-destination mode answers the FIRST request of this session
+    // with that destination's parks directly (DEST_PARKS_DATA) — the
+    // watch then behaves like a per-destination build, and cancels its
+    // dest-list watchdog on DEST_PARKS_DATA arrival (see api.c).
+    //
+    // Once only, because the watch re-requests the list whenever its
+    // destination picker lacks data (show_picker / BACK-from-park):
+    // answering every request with parks would loop forever
+    // (request -> parks -> show_picker -> request), and a single-park
+    // fixed destination would re-load the park on every BACK, trapping
+    // the user. Later requests get the normal list, which keeps the
+    // destination picker browsable — and recovers the session if the
+    // fixed id no longer exists upstream (handleDestSelect sends
+    // nothing, the watch's watchdog re-requests, the list answers).
+    // s_fixed_dest_served resets with PKJS itself on every watch app
+    // launch, and when settings change (webviewclosed re-applies).
+    var cfg = loadSettings();
+    if (IS_UBER && cfg.destMode === "fixed" && cfg.destId
+        && !s_fixed_dest_served) {
+      s_fixed_dest_served = true;
+      console.log("PKJS: fixed destination " + cfg.destId);
+      handleDestSelect(cfg.destId);
+      return;
+    }
     console.log("PKJS: request for destination list");
     buildAndSendDestList();
     return;

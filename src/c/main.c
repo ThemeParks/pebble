@@ -573,6 +573,15 @@ static void publish_glance(void)
 {
 	s_glance_count = 0;
 
+	/* Toggled off from the phone's config page: still run an (empty)
+	 * reload — adding no slices is what CLEARS a previously published
+	 * glance; returning without reloading would fossilise it. */
+	if (!storage_get_glance_enabled()) {
+		APP_LOG(APP_LOG_LEVEL_INFO, "glance: disabled");
+		app_glance_reload(prime_glance, NULL);
+		return;
+	}
+
 	time_t now = time(NULL);
 	struct tm lt = *localtime(&now);
 	int now_min = lt.tm_hour * 60 + lt.tm_min;
