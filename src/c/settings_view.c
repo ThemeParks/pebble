@@ -284,13 +284,13 @@ static void back_handler(ClickRecognizerRef ref, void *ctx)
 static void up_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (!s_menu) return;
-	menu_layer_set_selected_next(s_menu, true, MenuRowAlignCenter, false);
+	menu_layer_set_selected_next(s_menu, true, MenuRowAlignCenter, true);
 }
 
 static void down_handler(ClickRecognizerRef ref, void *ctx)
 {
 	if (!s_menu) return;
-	menu_layer_set_selected_next(s_menu, false, MenuRowAlignCenter, false);
+	menu_layer_set_selected_next(s_menu, false, MenuRowAlignCenter, true);
 }
 
 static void select_click_handler(ClickRecognizerRef ref, void *ctx)

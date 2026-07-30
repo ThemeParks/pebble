@@ -396,9 +396,50 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
 
 /* --- input handling -------------------------------------------------- */
 
+/* One in-flight frame animation per moving layer (header, tabs, menu).
+ * The SDK does not auto-destroy animations, so each slot is destroyed
+ * in its stopped handler; retriggering mid-flight unschedules first
+ * (which fires that handler synchronously). */
+static PropertyAnimation *s_anim_header = NULL;
+static PropertyAnimation *s_anim_tabs = NULL;
+static PropertyAnimation *s_anim_menu = NULL;
+
+static void frame_anim_stopped(Animation *anim, bool finished, void *ctx)
+{
+	PropertyAnimation **slot = ctx;
+	if (slot && *slot && property_animation_get_animation(*slot) == anim) {
+		property_animation_destroy(*slot);
+		*slot = NULL;
+	}
+}
+
+static void animate_frame(Layer *layer, GRect to, PropertyAnimation **slot)
+{
+	if (*slot) {
+		animation_unschedule(property_animation_get_animation(*slot));
+	}
+	if (*slot) {   /* stopped handler should have cleared it — belt & braces */
+		property_animation_destroy(*slot);
+		*slot = NULL;
+	}
+	*slot = property_animation_create_layer_frame(layer, NULL, &to);
+	if (!*slot) {
+		/* OOM — snap instead of losing the layout change. */
+		layer_set_frame(layer, to);
+		return;
+	}
+	Animation *a = property_animation_get_animation(*slot);
+	animation_set_duration(a, UI_ANIM_MS);
+	animation_set_curve(a, AnimationCurveEaseInOut);
+	animation_set_handlers(a, (AnimationHandlers){ .stopped = frame_anim_stopped },
+	                       slot);
+	animation_schedule(a);
+}
+
 /* Collapse / expand the park-name header to free up space for attractions.
  * When collapsed, the header slides off the top of the screen and the
- * tabs + menu move up by HEADER_HEIGHT. Tabs stay visible either way. */
+ * tabs + menu move up by HEADER_HEIGHT — animated, so the layout change
+ * reads as motion rather than a jump cut. Tabs stay visible either way. */
 static void set_header_collapsed(bool collapse)
 {
 	if (collapse == s_header_collapsed) return;
@@ -412,16 +453,19 @@ static void set_header_collapsed(bool collapse)
 	int menu_y = tabs_y + TAB_HEIGHT;
 
 	if (s_header) {
-		layer_set_frame(s_header,
-			GRect(0, header_y, root_b.size.w, HEADER_HEIGHT));
+		animate_frame(s_header,
+			GRect(0, header_y, root_b.size.w, HEADER_HEIGHT),
+			&s_anim_header);
 	}
 	if (s_tabs) {
-		layer_set_frame(s_tabs,
-			GRect(0, tabs_y, root_b.size.w, TAB_HEIGHT));
+		animate_frame(s_tabs,
+			GRect(0, tabs_y, root_b.size.w, TAB_HEIGHT),
+			&s_anim_tabs);
 	}
 	if (s_menu) {
-		layer_set_frame(menu_layer_get_layer(s_menu),
-			GRect(0, menu_y, root_b.size.w, root_b.size.h - menu_y));
+		animate_frame(menu_layer_get_layer(s_menu),
+			GRect(0, menu_y, root_b.size.w, root_b.size.h - menu_y),
+			&s_anim_menu);
 	}
 }
 
@@ -496,8 +540,8 @@ static void switch_page(page_t p)
 }
 
 /* Move the selection by `delta` rows, clamped to the list bounds.
- * No animation: the eased scroll reads as input lag on a one-row hop,
- * especially while the button repeats. */
+ * Animated — the motion starts on button-down so it feels instant, and
+ * the ease matches the native menus (see ui_common.h). */
 static void jump_rows(int delta)
 {
 	if (!s_menu || s_sorted_count == 0) return;
@@ -506,7 +550,7 @@ static void jump_rows(int delta)
 	if (target < 0) target = 0;
 	if (target >= s_sorted_count) target = s_sorted_count - 1;
 	MenuIndex next = { .section = 0, .row = (uint16_t)target };
-	menu_layer_set_selected_index(s_menu, next, MenuRowAlignCenter, false);
+	menu_layer_set_selected_index(s_menu, next, MenuRowAlignCenter, true);
 }
 
 static void up_handler(ClickRecognizerRef ref, void *ctx)
@@ -658,6 +702,11 @@ static void window_load(Window *w)
 
 static void window_unload(Window *w)
 {
+	/* Stop frame animations BEFORE their target layers die — the
+	 * stopped handlers destroy and NULL the slots synchronously. */
+	if (s_anim_header) animation_unschedule(property_animation_get_animation(s_anim_header));
+	if (s_anim_tabs) animation_unschedule(property_animation_get_animation(s_anim_tabs));
+	if (s_anim_menu) animation_unschedule(property_animation_get_animation(s_anim_menu));
 	if (s_menu) { menu_layer_destroy(s_menu); s_menu = NULL; }
 	if (s_tabs) { layer_destroy(s_tabs); s_tabs = NULL; }
 	if (s_header) { layer_destroy(s_header); s_header = NULL; }

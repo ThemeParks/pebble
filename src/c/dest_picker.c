@@ -469,7 +469,7 @@ static void region_scroll_click(ClickRecognizerRef rec, void *ctx)
 {
     bool up = click_recognizer_get_button_id(rec) == BUTTON_ID_UP;
     menu_layer_set_selected_next(s_region_menu, up,
-                                 MenuRowAlignCenter, false);
+                                 MenuRowAlignCenter, true);
 }
 
 static void region_select_click(ClickRecognizerRef rec, void *ctx)
