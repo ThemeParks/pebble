@@ -50,6 +50,9 @@ function splitIntoChunks(payload, limit) {
 //   Line 2: lastUpdated timestamp
 //   Lines:  "A|id|name|status|waitMins"   (attractions, waitMins may be empty)
 //   Lines:  "S|id|name|status|t1,t2,..."  (shows, times comma-separated)
+//   Lines:  "F|YYYY-MM-DD|open|close"     (upcoming days, from data.f —
+//           optional; an absent/empty f emits nothing, so the pre-glance
+//           payload shape still encodes byte-identically)
 function encodeParkData(data) {
   var lines = [];
   // Schedule line
@@ -73,6 +76,15 @@ function encodeParkData(data) {
     var s = data.h[i];
     var times = s[3] ? s[3].join(",") : "";
     lines.push("S|" + s[0] + "|" + s[1] + "|" + s[2] + "|" + times);
+  }
+  // Upcoming days — includes today; the watch keys today's hours off
+  // line 1 and consumes F| entries only for dates strictly after today
+  // (dedupe convention documented in parkdata.c).
+  if (data.f) {
+    for (var i = 0; i < data.f.length; i++) {
+      var fd = data.f[i];
+      lines.push("F|" + fd.date + "|" + fd.o + "|" + fd.c);
+    }
   }
   return lines.join("\n");
 }
@@ -140,6 +152,42 @@ function getTodaySchedule(schedule, todayStr, nowMs) {
     }
   }
   return null;
+}
+
+// Upcoming OPERATING days for the glance's multi-day slice queue: up to
+// maxDays of {date:"YYYY-MM-DD", o:"HH:MM", c:"HH:MM"}, ordered by date,
+// deduped by date (first OPERATING session per date wins — mirrors
+// getTodaySchedule skipping TICKETED_EVENT entries). Today is included.
+// "Upcoming" reuses getTodaySchedule's fallback thinking for parks east
+// of UTC, where the park-local date can sit ahead of the UTC todayStr:
+// rather than comparing against todayStr, an entry counts while its
+// closingTime is still in the future — which also keeps a still-open
+// overnight session dated "yesterday". Entries missing either time are
+// dropped (the watch needs both to render a slice and set its expiry).
+// nowMs is optional (defaults to Date.now()) so tests can pin time.
+function getUpcomingSchedule(schedule, todayStr, maxDays, nowMs) {
+  var now = nowMs === undefined ? Date.now() : nowMs;
+  var sorted = schedule.slice().sort(function (a, b) {
+    if (a.date < b.date) return -1;
+    if (a.date > b.date) return 1;
+    return 0;
+  });
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < sorted.length && out.length < maxDays; i++) {
+    var e = sorted[i];
+    if (e.type !== "OPERATING") continue;
+    if (seen[e.date]) continue;
+    if (!e.openingTime || !e.closingTime) continue;
+    if (new Date(e.closingTime).getTime() <= now) continue;
+    seen[e.date] = true;
+    out.push({
+      date: e.date,
+      o: formatTime(e.openingTime),
+      c: formatTime(e.closingTime),
+    });
+  }
+  return out;
 }
 
 // Build the destination-list payload lines sent to the watch:
@@ -284,6 +332,7 @@ module.exports = {
   formatTime: formatTime,
   shouldServeCache: shouldServeCache,
   getTodaySchedule: getTodaySchedule,
+  getUpcomingSchedule: getUpcomingSchedule,
   classifyRegion: classifyRegion,
   haversineDist: haversineDist,
   buildDestLines: buildDestLines,

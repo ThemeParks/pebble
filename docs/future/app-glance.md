@@ -5,22 +5,14 @@
 
 ## Follow-ups (not yet implemented)
 
-- **Template countdowns**: render the hours rung with an AppGlance
-  subtitle template predicate (`time_until(<close_epoch>)` → "closes in
-  45 min", "opens in 2h" pre-open) instead of static "9 AM - 10 PM" —
-  the launcher evaluates the template at render time, so the text stays
-  continuously accurate with zero background execution.
-- **Multi-day slice queue**: every published slice expires (waits after
-  30 min, hours at that day's close), so after the last expiry the
-  launcher shows only the app name — a user who doesn't open the app for
-  weeks gets nothing rather than something stale ("absence over
-  staleness"). AppGlance accepts up to 8 slices per reload, advancing as
-  each expires, and the schedule endpoint already returns multi-week
-  data (PKJS currently filters to today). Queueing ~a week of per-day
-  hours slices (today's countdown, then tomorrow's hours expiring at
-  tomorrow's close, ...) keeps the glance accurate for about a week
-  untouched. Needs the wire payload to carry future days' hours. Beyond
-  that horizon, only server-pushed timeline topics stay live
+- **Persisted multi-day hours**: the multi-day slice queue is built from
+  the exited session's live data (`g_park.future_days`, still populated
+  after backing out to the picker). A session that never fetched the
+  park — e.g. relaunch-and-immediately-exit, which resolves hours from
+  the persisted single-day cache — publishes nothing beyond today, and
+  the uber build's picker exits publish nothing at all. Persisting the
+  F| days per park would extend the week-long glance to those exits too.
+  Beyond the ~week horizon, only server-pushed timeline topics stay live
   (docs/future/timeline-pins.md).
 
 ## Concept
@@ -103,3 +95,55 @@ Small. One new function in main.c, one pure helper in format.c + unit tests, no 
   `format_hours_current` (daytime, pre-open, after close, past-midnight
   close at 23:00/00:30/02:00).
 - No PKJS or protocol changes, as designed.
+
+### Template countdowns (follow-up, implemented)
+
+- The hours rung is now rendered with AppGlance **subtitle template
+  strings**, which the launcher re-evaluates every time it draws the
+  glance — the text stays continuously accurate with zero app execution.
+  Syntax (per the archived SDK guide, developer.repebble.com
+  "AppGlance C API"): `{time_until(<epoch>)|format('<fmt>')}` where the
+  format specifier `%aR` renders the remaining span as abbreviated
+  hours + minutes ("2 hr 4 min", "45 min") — the readable choice for
+  multi-hour park days (`%aT` would add noisy seconds, `%uR` unabridged
+  words risk truncation on narrow launchers).
+- `format_glance_countdown(park, verb, epoch, out, outsz)` (format.c,
+  pure, unit-tested) composes the exact line:
+  `"<Park> · opens in {time_until(<open_epoch>)|format('%aR')}"` /
+  `"<Park> · closes in {time_until(<close_epoch>)|format('%aR')}"`.
+- For today the publisher queues up to two countdown slices: pre-open
+  ("opens in ...", expiring at the open epoch — only on same-day
+  schedules, since with a past-midnight close "before open" is really
+  the previous operating day still running) and open ("closes in ...",
+  expiring at close).
+
+### Multi-day slice queue (follow-up, implemented)
+
+- **Wire**: PKJS now sends `F|YYYY-MM-DD|open|close` lines — up to 7
+  upcoming OPERATING days from `getUpcomingSchedule()` (lib.js; ordered,
+  deduped by date, "upcoming" = closingTime still in the future, which
+  also handles parks east of UTC). The field is optional: absent `f`
+  encodes byte-identically to the old payload shape. **Dedupe
+  convention**: PKJS includes today in F|; the watch keys today's hours
+  off line 0 and consumes F| entries only for dates strictly after today
+  (documented in parkdata.c).
+- **Parser**: `future_day_t future_days[MAX_FUTURE_DAYS=7]` +
+  `future_day_count` on `g_park`, cleared by `parkdata_clear()`; strict
+  date-shape validation, malformed lines skipped, capped at 7.
+- **Publisher** (main.c `publish_glance`): builds up to 8 slices in
+  order (launcher shows the first, advancing as each expires):
+  1. headline wait (expires now+30 min);
+  2. today's countdown slice(s) (see above);
+  3. upcoming days as static `"<Wkday> · 9 AM - 10 PM"` (weekday via
+     `strftime "%a"`, times via `format_clock_time`, expiration at that
+     day's close — past-midnight closes roll to the next calendar day).
+  Future-day slices come only from the exited session's live data
+  (`g_park` keeps them across the BACK-to-picker hop; a park-name check
+  ties them to the published park). Sessions that never fetched the park
+  publish nothing beyond today (see Follow-ups). The exit log line is
+  now `glance: <N> slices, first: <text>` (or `glance: none`).
+- **Tests**: template text pinned in test_format.c
+  (`test_glance_countdown_*`); parser behaviour in test_parkdata.c
+  (`test_future_days_*`); PKJS helpers in tests/js/test_lib.js
+  (`getUpcomingSchedule` ordering/dedupe/cap/overnight,
+  `encodeParkData` F| emission and byte-identical no-f encoding).

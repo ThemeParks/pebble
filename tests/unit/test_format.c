@@ -281,6 +281,65 @@ static void test_glance_truncation_safe(void)
 	ASSERT_EQ_STR("Disney's Animal Kingdom", out);
 }
 
+static void test_glance_countdown_template(void)
+{
+	/* Pins the exact AppGlance template text: the launcher parses the
+	 * {time_until(...)|format(...)} braces at render time, so any drift
+	 * here would show up as literal braces on the launcher. */
+	char out[96];
+	format_glance_countdown("Magic Kingdom", "closes", 1753797600u,
+	                        out, sizeof(out));
+	ASSERT_EQ_STR(
+		"Magic Kingdom · closes in {time_until(1753797600)|format('%aR')}",
+		out);
+	format_glance_countdown("Epcot", "opens", 1753772400u,
+	                        out, sizeof(out));
+	ASSERT_EQ_STR(
+		"Epcot · opens in {time_until(1753772400)|format('%aR')}", out);
+}
+
+static void test_glance_countdown_no_park(void)
+{
+	/* Empty/NULL park drops the prefix, not just the name. */
+	char out[96];
+	format_glance_countdown("", "closes", 1u, out, sizeof(out));
+	ASSERT_EQ_STR("closes in {time_until(1)|format('%aR')}", out);
+	format_glance_countdown(NULL, "opens", 1u, out, sizeof(out));
+	ASSERT_EQ_STR("opens in {time_until(1)|format('%aR')}", out);
+}
+
+static void test_glance_countdown_safe(void)
+{
+	/* Truncation must clamp at outsz-1 + NUL, never overrun. (Callers
+	 * are expected to size buffers so this never happens for real —
+	 * a cut template renders literally.) */
+	char tiny[16];
+	format_glance_countdown("Magic Kingdom", "closes", 1753797600u,
+	                        tiny, sizeof(tiny));
+	ASSERT_EQ_INT((int)sizeof(tiny) - 1, (int)strlen(tiny));
+
+	/* Degenerate inputs must not blow up or emit half a template. */
+	char out[96];
+	format_glance_countdown("MK", NULL, 1u, out, sizeof(out));
+	ASSERT_EQ_STR("", out);
+	format_glance_countdown("MK", "", 1u, out, sizeof(out));
+	ASSERT_EQ_STR("", out);
+	format_glance_countdown("MK", "closes", 1u, out, 0);  /* no crash */
+}
+
+static void test_glance_countdown_max_epoch(void)
+{
+	/* The widest epoch (2^32-1) must still fit main.c's 96-byte slots
+	 * with the longest real park name. */
+	char out[96];
+	format_glance_countdown("Disney's Hollywood Studios", "closes",
+	                        4294967295u, out, sizeof(out));
+	ASSERT_EQ_STR(
+		"Disney's Hollywood Studios · closes in "
+		"{time_until(4294967295)|format('%aR')}", out);
+	ASSERT_TRUE((int)strlen(out) < 96 - 1);
+}
+
 static void test_glance_hours_current(void)
 {
 	/* Normal daytime schedule: open 09:00, close 22:00. */
@@ -317,6 +376,10 @@ int main(void)
 	RUN_TEST(test_glance_none);
 	RUN_TEST(test_glance_no_park_name);
 	RUN_TEST(test_glance_truncation_safe);
+	RUN_TEST(test_glance_countdown_template);
+	RUN_TEST(test_glance_countdown_no_park);
+	RUN_TEST(test_glance_countdown_safe);
+	RUN_TEST(test_glance_countdown_max_epoch);
 	RUN_TEST(test_glance_hours_current);
 	return unit_summary();
 }

@@ -68,6 +68,20 @@ typedef struct {
 int format_glance_line(const glance_input_t *in, bool use_24h,
                        char *out, int outsz);
 
+/* Compose an AppGlance subtitle countdown template:
+ *   "<Park> · <verb> in {time_until(<epoch>)|format('%aR')}"
+ * The launcher evaluates the template every time it renders the glance,
+ * so the text stays continuously accurate with zero app execution.
+ * '%aR' is the abbreviated hours+minutes span ("2 hr 4 min", "45 min")
+ * — the readable choice for the multi-hour spans park days produce
+ * (syntax per the archived SDK AppGlance guide; see
+ * docs/future/app-glance.md). Empty/NULL park drops the prefix instead
+ * of rendering a dangling " · ". Truncates safely into outsz — but a
+ * truncated template renders literally, so callers must size out for
+ * the whole line (main.c uses 96-byte slots). */
+void format_glance_countdown(const char *park_name, const char *verb,
+                             uint32_t epoch, char *out, int outsz);
+
 /* Are park hours still worth showing, given minutes-since-midnight?
  * True from midnight up to close (pre-open hours are informative), with
  * past-midnight closes (close < open) handled — see the impl comment.

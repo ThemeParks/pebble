@@ -427,11 +427,18 @@ static void load_park_force(int park_idx)
 
 /* --- app glance ------------------------------------------------------ */
 
-/* The composed glance line lives here because subtitle_template_string
- * is read when the reload session commits, after prime_glance returns —
- * a stack buffer would be gone by then. */
-static char s_glance_buf[64];
-static time_t s_glance_expiry;
+/* The slice queue lives in statics because subtitle_template_string is
+ * only read when the reload session commits, after prime_glance returns
+ * — stack buffers would be gone by then. 8 matches the AppGlance
+ * per-app slice cap; 96 bytes covers the longest composed countdown
+ * template ("Disney's Hollywood Studios · closes in
+ * {time_until(4294967295)|format('%aR')}" is 77 chars) — a template
+ * truncated mid-brace would render literally, so the slack matters. */
+#define GLANCE_MAX_SLICES 8
+#define GLANCE_SLICE_LEN 96
+static char s_glance_text[GLANCE_MAX_SLICES][GLANCE_SLICE_LEN];
+static time_t s_glance_expiry[GLANCE_MAX_SLICES];
+static int s_glance_count;
 
 /* Strict wire "HH:MM" → minutes since midnight, or -1. Mirrors the
  * parse in format_clock_time; a -1 here means a legacy cached string
@@ -451,8 +458,18 @@ static int glance_hhmm_to_min(const char *hhmm)
 	return hh * 60 + mm;
 }
 
-/* Today's close as an epoch — the hours slice's expiration, so a stale
- * glance never outlives its truth. */
+/* Minutes-since-midnight on today's date → epoch. */
+static time_t glance_min_to_epoch(time_t now, int min)
+{
+	struct tm t = *localtime(&now);
+	t.tm_hour = min / 60;
+	t.tm_min = min % 60;
+	t.tm_sec = 0;
+	return mktime(&t);
+}
+
+/* Today's close as an epoch — the closing slice's expiration, so a
+ * stale glance never outlives its truth. */
 static time_t glance_close_epoch(time_t now, int now_min,
                                  int open_min, int close_min)
 {
@@ -464,6 +481,42 @@ static time_t glance_close_epoch(time_t now, int now_min,
 	 * small hours before it (now < close), the close lands on tomorrow's
 	 * date — bump the day and let mktime normalise any month rollover. */
 	if (close_min < open_min && now_min >= close_min) t.tm_mday += 1;
+	return mktime(&t);
+}
+
+/* Strict "YYYY-MM-DD" (the shape parkdata.c already enforced on F|
+ * lines — re-checked here because persist could someday feed this too). */
+static bool glance_parse_date(const char *s, int *y, int *mo, int *d)
+{
+	for (int i = 0; i < 10; i++) {
+		if (i == 4 || i == 7) {
+			if (s[i] != '-') return false;
+		} else if (s[i] < '0' || s[i] > '9') {
+			return false;
+		}
+	}
+	if (s[10] != '\0') return false;
+	*y  = (s[0] - '0') * 1000 + (s[1] - '0') * 100
+	    + (s[2] - '0') * 10 + (s[3] - '0');
+	*mo = (s[5] - '0') * 10 + (s[6] - '0');
+	*d  = (s[8] - '0') * 10 + (s[9] - '0');
+	return *mo >= 1 && *mo <= 12 && *d >= 1 && *d <= 31;
+}
+
+/* Minutes-since-midnight on an arbitrary date (+day_offset for closes
+ * that roll past midnight) → epoch. Starting from localtime(now) keeps
+ * the DST guess consistent with the rest of this file; mktime
+ * normalises any month/year rollover from the offset. */
+static time_t glance_date_epoch(time_t now, int y, int mo, int d,
+                                int min, int day_offset)
+{
+	struct tm t = *localtime(&now);
+	t.tm_year = y - 1900;
+	t.tm_mon = mo - 1;
+	t.tm_mday = d + day_offset;
+	t.tm_hour = min / 60;
+	t.tm_min = min % 60;
+	t.tm_sec = 0;
 	return mktime(&t);
 }
 
@@ -486,34 +539,47 @@ static void prime_glance(AppGlanceReloadSession *session,
                          size_t limit, void *context)
 {
 	(void)context;
-	/* An empty buffer means the ladder produced nothing — adding no
-	 * slice here is what clears any previous glance back to the plain
-	 * app name. */
-	if (limit < 1 || s_glance_buf[0] == '\0') return;
-	const AppGlanceSlice slice = {
-		.layout = {
-			.icon = APP_GLANCE_SLICE_DEFAULT_ICON,
-			.subtitle_template_string = s_glance_buf,
-		},
-		.expiration_time = s_glance_expiry,
-	};
-	AppGlanceResult res = app_glance_add_slice(session, slice);
-	if (res != APP_GLANCE_RESULT_SUCCESS) {
-		APP_LOG(APP_LOG_LEVEL_WARNING, "glance: add_slice failed (%d)",
-		        (int)res);
+	/* Slices go in queue order: the launcher shows the first live one
+	 * and advances as each expires. A zero-slice session is deliberate —
+	 * adding nothing is what clears any previous glance back to the
+	 * plain app name. */
+	size_t n = (size_t)s_glance_count;
+	if (n > limit) n = limit;
+	for (size_t i = 0; i < n; i++) {
+		const AppGlanceSlice slice = {
+			.layout = {
+				.icon = APP_GLANCE_SLICE_DEFAULT_ICON,
+				.subtitle_template_string = s_glance_text[i],
+			},
+			.expiration_time = s_glance_expiry[i],
+		};
+		AppGlanceResult res = app_glance_add_slice(session, slice);
+		if (res != APP_GLANCE_RESULT_SUCCESS) {
+			APP_LOG(APP_LOG_LEVEL_WARNING,
+			        "glance: add_slice %d failed (%d)", (int)i, (int)res);
+		}
 	}
 }
 
-/* Build the glance line for the last-viewed park and hand it to the
- * launcher. Called from deinit(), i.e. every app exit. */
+/* Build the glance slice queue for the last-viewed park and hand it to
+ * the launcher. Called from deinit(), i.e. every app exit. Queue order
+ * (earlier = shown first, launcher advances as each expires):
+ *   1. headline wait            (expires now+30m)
+ *   2. "opens in ..." countdown (pre-open only; expires at open)
+ *   3. "closes in ..." countdown (expires at close)
+ *   4+. upcoming days "Wed · 9 AM - 10 PM" (each expires at its close)
+ */
 static void publish_glance(void)
 {
-	s_glance_buf[0] = '\0';
-	s_glance_expiry = 0;
+	s_glance_count = 0;
 
 	time_t now = time(NULL);
 	struct tm lt = *localtime(&now);
 	int now_min = lt.tm_hour * 60 + lt.tm_min;
+	/* Park dates on the wire are "YYYY-MM-DD" — same shape here so the
+	 * today/future split is a plain strcmp. */
+	char today[DATE_STR_LEN];
+	strftime(today, sizeof(today), "%Y-%m-%d", &lt);
 
 	int idx = s_current_park;
 #ifndef MULTI_DESTINATION
@@ -533,14 +599,40 @@ static void publish_glance(void)
 
 	if (idx >= 0) {
 		const char *park_id = g_parks[idx].id;
-		glance_input_t in = {
-			.park_name = g_parks[idx].name,
-			.wait_mins = -1,
-		};
+		const char *park_name = g_parks[idx].name;
+		bool use_24h = clock_is_24h_style();
 
-		/* Hours: prefer the live fetch (g_park only holds this park's
-		 * data when it's still current), else the persisted cache —
-		 * which works offline and when the fetch never completed. */
+		/* Headline wait first: only from live data for this park, only
+		 * fresh enough that the launcher won't show a fossil. When it
+		 * expires (30 min) the launcher advances to the countdowns. */
+		if (idx == s_current_park && g_park.last_updated_secs != 0
+		    && now >= (time_t)g_park.last_updated_secs) {
+			uint32_t age = (uint32_t)now - g_park.last_updated_secs;
+			const attraction_t *a = (age < GLANCE_WAIT_MAX_AGE_SECS)
+				? glance_headline(park_id) : NULL;
+			if (a && s_glance_count < GLANCE_MAX_SLICES) {
+				glance_input_t in = {
+					.park_name = park_name,
+					.ride_name = a->name,
+					.wait_mins = a->wait,
+					.wait_age_secs = age,
+				};
+				if (format_glance_line(&in, use_24h,
+				                       s_glance_text[s_glance_count],
+				                       GLANCE_SLICE_LEN)
+				    == GLANCE_RUNG_WAIT) {
+					s_glance_expiry[s_glance_count] =
+						now + GLANCE_WAIT_MAX_AGE_SECS;
+					s_glance_count++;
+				}
+			}
+		}
+
+		/* Today's countdown slice(s). Hours: prefer the live fetch
+		 * (g_park only holds this park's data when it's still current),
+		 * else the persisted cache — which works offline and when the
+		 * fetch never completed. Any parse failure (legacy cached
+		 * strings like "9 AM") → no time math possible, no countdown. */
 		char open_buf[PARK_HOURS_STR_LEN], close_buf[PARK_HOURS_STR_LEN];
 		const char *open_s = NULL, *close_s = NULL;
 		if (idx == s_current_park && g_park.has_schedule) {
@@ -550,50 +642,116 @@ static void publish_glance(void)
 			open_s = open_buf;
 			close_s = close_buf;
 		}
-		time_t close_epoch = 0;
 		if (open_s && close_s) {
 			int open_min = glance_hhmm_to_min(open_s);
 			int close_min = glance_hhmm_to_min(close_s);
-			/* Any parse failure (legacy cached strings) → hours are not
-			 * "current"; the ladder falls through to the wait rung. */
 			if (open_min >= 0 && close_min >= 0
 			    && format_hours_current(now_min, open_min, close_min)) {
-				close_epoch = glance_close_epoch(now, now_min,
-				                                 open_min, close_min);
-				if (close_epoch > now) {
-					in.has_schedule = true;
-					in.hours_current = true;
-					in.open_hhmm = open_s;
-					in.close_hhmm = close_s;
+				/* Pre-open slice — only on a same-day schedule: with a
+				 * past-midnight close, "current && before open" means
+				 * the small hours of the PREVIOUS operating day, where
+				 * the park is open, not opening. */
+				if (close_min > open_min && now_min < open_min
+				    && s_glance_count < GLANCE_MAX_SLICES) {
+					time_t open_epoch =
+						glance_min_to_epoch(now, open_min);
+					if (open_epoch > now) {
+						format_glance_countdown(park_name, "opens",
+							(uint32_t)open_epoch,
+							s_glance_text[s_glance_count],
+							GLANCE_SLICE_LEN);
+						s_glance_expiry[s_glance_count] = open_epoch;
+						s_glance_count++;
+					}
+				}
+				time_t close_epoch = glance_close_epoch(now, now_min,
+				                                        open_min,
+				                                        close_min);
+				if (close_epoch > now
+				    && s_glance_count < GLANCE_MAX_SLICES) {
+					format_glance_countdown(park_name, "closes",
+						(uint32_t)close_epoch,
+						s_glance_text[s_glance_count],
+						GLANCE_SLICE_LEN);
+					s_glance_expiry[s_glance_count] = close_epoch;
+					s_glance_count++;
 				}
 			}
 		}
 
-		/* Headline wait: only from live data for this park, and only
-		 * fresh enough that the launcher won't show a fossil. */
-		if (idx == s_current_park && g_park.last_updated_secs != 0
-		    && now >= (time_t)g_park.last_updated_secs) {
-			uint32_t age = (uint32_t)now - g_park.last_updated_secs;
-			if (age < GLANCE_WAIT_MAX_AGE_SECS) {
-				const attraction_t *a = glance_headline(park_id);
-				if (a) {
-					in.ride_name = a->name;
-					in.wait_mins = a->wait;
-					in.wait_age_secs = age;
-				}
+		/* Upcoming days — only from the exited session's live data.
+		 * s_current_park is -1 on every BACK-BACK exit (each hop to a
+		 * picker clears it as a view-stealing guard), but g_park still
+		 * holds the last-viewed park's F| entries — and in the builds
+		 * that reach here with a fallback idx, that park IS the
+		 * persisted last park (load_park set both). The park name (set
+		 * alongside every load/parse, truncated to the store's slot) is
+		 * the surviving identity check. A session that never fetched
+		 * this park's data has future_day_count == 0 and publishes
+		 * nothing beyond today — matching the previous behaviour for
+		 * persisted-hours-only exits. */
+		bool session_is_this_park = (idx == s_current_park)
+			|| (g_park.future_day_count > 0
+			    && strncmp(g_park.park_name, park_name,
+			               sizeof(g_park.park_name) - 1) == 0);
+		if (session_is_this_park) {
+			for (int i = 0; i < g_park.future_day_count
+			     && s_glance_count < GLANCE_MAX_SLICES; i++) {
+				const future_day_t *fd = &g_park.future_days[i];
+				/* Dedupe convention (see parkdata.c): PKJS includes
+				 * today in F|; line 0 already covered it above, so
+				 * only dates strictly after today contribute here. */
+				if (strcmp(fd->date, today) <= 0) continue;
+				int y, mo, d;
+				if (!glance_parse_date(fd->date, &y, &mo, &d)) continue;
+				int fo = glance_hhmm_to_min(fd->open);
+				int fc = glance_hhmm_to_min(fd->close);
+				if (fo < 0 || fc < 0) continue;
+
+				/* Weekday label from the date itself. Noon dodges any
+				 * DST-shift ambiguity; mktime fills tm_wday for %a. */
+				struct tm dt = lt;
+				dt.tm_year = y - 1900;
+				dt.tm_mon = mo - 1;
+				dt.tm_mday = d;
+				dt.tm_hour = 12;
+				dt.tm_min = 0;
+				dt.tm_sec = 0;
+				mktime(&dt);
+				char wkday[8];
+				strftime(wkday, sizeof(wkday), "%a", &dt);
+
+				/* Reuse the hours-rung composer: park slot carries the
+				 * weekday → "Wed · 9 AM - 10 PM". */
+				glance_input_t din = {
+					.park_name = wkday,
+					.has_schedule = true,
+					.open_hhmm = fd->open,
+					.close_hhmm = fd->close,
+					.hours_current = true,
+					.wait_mins = -1,
+				};
+				if (format_glance_line(&din, use_24h,
+				                       s_glance_text[s_glance_count],
+				                       GLANCE_SLICE_LEN)
+				    != GLANCE_RUNG_HOURS) continue;
+				/* Expire at that day's close; past-midnight closes
+				 * roll to the next calendar day like today's logic. */
+				time_t exp = glance_date_epoch(now, y, mo, d, fc,
+				                               (fc < fo) ? 1 : 0);
+				if (exp <= now) continue;
+				s_glance_expiry[s_glance_count] = exp;
+				s_glance_count++;
 			}
 		}
-
-		int rung = format_glance_line(&in, clock_is_24h_style(),
-		                              s_glance_buf, sizeof(s_glance_buf));
-		if (rung == GLANCE_RUNG_HOURS) s_glance_expiry = close_epoch;
-		else if (rung == GLANCE_RUNG_WAIT)
-			s_glance_expiry = now + GLANCE_WAIT_MAX_AGE_SECS;
-		else s_glance_buf[0] = '\0';
 	}
 
-	APP_LOG(APP_LOG_LEVEL_INFO, "glance: %s",
-	        s_glance_buf[0] ? s_glance_buf : "none");
+	if (s_glance_count > 0) {
+		APP_LOG(APP_LOG_LEVEL_INFO, "glance: %d slices, first: %s",
+		        s_glance_count, s_glance_text[0]);
+	} else {
+		APP_LOG(APP_LOG_LEVEL_INFO, "glance: none");
+	}
 	/* Always reload — a session that adds no slice clears any previous
 	 * one, so an outdated glance can't survive an exit that produced
 	 * nothing. */

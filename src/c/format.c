@@ -107,6 +107,29 @@ bool format_hours_current(int now_min, int open_min, int close_min)
 	return now_min < close_min;
 }
 
+void format_glance_countdown(const char *park_name, const char *verb,
+                             uint32_t epoch, char *out, int outsz)
+{
+	if (outsz <= 0) return;
+	out[0] = '\0';
+	if (!verb || !verb[0]) return;
+	/* The {time_until(...)|format(...)} braces are template syntax the
+	 * launcher evaluates at render time — everything else is literal.
+	 * Epoch as %lu: watch time_t is 32-bit and Pebble's tiny printf has
+	 * no %lld, so uint32_t in and unsigned long through the formatter
+	 * works on both the watch and the 64-bit test host. */
+	const char *park =
+		(park_name && park_name[0]) ? park_name : NULL;
+	if (park)
+		snprintf(out, outsz,
+		         "%s · %s in {time_until(%lu)|format('%%aR')}",
+		         park, verb, (unsigned long)epoch);
+	else
+		snprintf(out, outsz,
+		         "%s in {time_until(%lu)|format('%%aR')}",
+		         verb, (unsigned long)epoch);
+}
+
 int format_glance_line(const glance_input_t *in, bool use_24h,
                        char *out, int outsz)
 {

@@ -20,6 +20,7 @@ var splitIntoChunks = lib.splitIntoChunks;
 var encodeParkData = lib.encodeParkData;
 var shouldServeCache = lib.shouldServeCache;
 var getTodaySchedule = lib.getTodaySchedule;
+var getUpcomingSchedule = lib.getUpcomingSchedule;
 var classifyRegion = lib.classifyRegion;
 var haversineDist = lib.haversineDist;
 var buildDestLines = lib.buildDestLines;
@@ -513,11 +514,18 @@ function fetchAndFilter(parkId) {
 
     const filtered = filterLiveData(liveJson.liveData || []);
     const schedule = scheduleJson ? getTodaySchedule(scheduleJson.schedule || [], todayStr) : null;
+    // Upcoming OPERATING days (today included — the watch dedupes: sc
+    // covers today, F| entries feed the glance for dates after today).
+    // 7 days ≈ the AppGlance slice budget.
+    const upcoming = scheduleJson
+      ? getUpcomingSchedule(scheduleJson.schedule || [], todayStr, 7)
+      : [];
 
     // Compact payload with short field names:
     //   sc: schedule { o: open, c: close }
     //   a:  attractions [[id, name, status, waitMins], ...]
     //   h:  shows       [[id, name, status, [times]], ...]
+    //   f:  upcoming days [{date, o, c}, ...]
     //   u:  lastUpdated
     // Hard cap — must match MAX_ATTRACTIONS / MAX_SHOWS in parkdata.h.
     // Operating rides sorted by wait desc, then closed.
@@ -533,6 +541,7 @@ function fetchAndFilter(parkId) {
       sc: schedule,
       a: a,
       h: h,
+      f: upcoming,
       u: Date.now(),
     };
   });

@@ -162,6 +162,83 @@ static void test_truncation_at_caps(void)
 	ASSERT_EQ_STR("Show 0", g_park.shows[0].name);
 }
 
+static void test_future_days_parse(void)
+{
+	/* F| lines land in future_days regardless of position among the
+	 * entity lines; PKJS includes today's date too (the publisher, not
+	 * the parser, applies the dates-after-today convention). */
+	ASSERT_TRUE(parse_str(
+		"09:00|22:00\n1753776000\n"
+		"F|2026-07-30|09:00|22:00\n"
+		"A|aaaa|Ride|O|10\n"
+		"F|2026-07-31|08:30|01:00\n"));
+	ASSERT_EQ_INT(2, g_park.future_day_count);
+	ASSERT_EQ_STR("2026-07-30", g_park.future_days[0].date);
+	ASSERT_EQ_STR("09:00", g_park.future_days[0].open);
+	ASSERT_EQ_STR("22:00", g_park.future_days[0].close);
+	ASSERT_EQ_STR("2026-07-31", g_park.future_days[1].date);
+	ASSERT_EQ_STR("08:30", g_park.future_days[1].open);
+	ASSERT_EQ_STR("01:00", g_park.future_days[1].close);
+	/* A|/S| parsing is unaffected by interleaved F| lines. */
+	ASSERT_EQ_INT(1, g_park.attraction_count);
+	ASSERT_EQ_STR("Ride", g_park.attractions[0].name);
+}
+
+static void test_future_days_capped(void)
+{
+	static char buf[1024];
+	int off = snprintf(buf, sizeof(buf), "\n1753776000\n");
+	for (int i = 0; i < MAX_FUTURE_DAYS + 3; i++) {
+		off += snprintf(buf + off, sizeof(buf) - off,
+		                "F|2026-08-%02d|09:00|22:00\n", i + 1);
+	}
+	ASSERT_TRUE(parkdata_parse(buf, (uint16_t)off));
+	ASSERT_EQ_INT(MAX_FUTURE_DAYS, g_park.future_day_count);
+	/* First seven kept, extras dropped — order preserved. */
+	ASSERT_EQ_STR("2026-08-01", g_park.future_days[0].date);
+	ASSERT_EQ_STR("2026-08-07",
+	              g_park.future_days[MAX_FUTURE_DAYS - 1].date);
+}
+
+static void test_future_days_malformed_skipped(void)
+{
+	/* Bad shapes must be skipped without crashing or shifting the good
+	 * entries: wrong date shape, missing fields, empty times. */
+	ASSERT_TRUE(parse_str(
+		"\n1753776000\n"
+		"F|2026-7-30|09:00|22:00\n"     /* date not zero-padded (9 chars) */
+		"F|2026/07/30|09:00|22:00\n"    /* wrong separators */
+		"F|2026-13-01|09:00|22:00\n"    /* month out of range: parser only
+		                                 * checks shape — see below */
+		"F|2026-07-30|09:00\n"          /* missing close field */
+		"F|2026-07-30\n"                /* date only */
+		"F|\n"                          /* nothing at all */
+		"F|2026-07-30||22:00\n"         /* empty open */
+		"F|2026-07-30|09:00|\n"         /* empty close */
+		"F|2026-07-31|10:00|21:00\n"    /* the one good line */
+		"A|aaaa|Ride|O|5\n"));
+	/* Shape-valid dates pass the parser (2026-13-01 is digits-and-dashes);
+	 * the publisher's stricter month/day range check rejects them before
+	 * any epoch math. So: the good line + the range-bad-but-shape-ok one. */
+	ASSERT_EQ_INT(2, g_park.future_day_count);
+	ASSERT_EQ_STR("2026-13-01", g_park.future_days[0].date);
+	ASSERT_EQ_STR("2026-07-31", g_park.future_days[1].date);
+	ASSERT_EQ_STR("10:00", g_park.future_days[1].open);
+	ASSERT_EQ_INT(1, g_park.attraction_count);
+}
+
+static void test_future_days_cleared(void)
+{
+	ASSERT_TRUE(parse_str(
+		"\n1753776000\nF|2026-07-30|09:00|22:00\n"));
+	ASSERT_EQ_INT(1, g_park.future_day_count);
+	parkdata_clear();
+	ASSERT_EQ_INT(0, g_park.future_day_count);
+	/* And a fresh parse without F| lines must not resurrect old ones. */
+	ASSERT_TRUE(parse_str("\n1753776000\nA|aaaa|Ride|O|10\n"));
+	ASSERT_EQ_INT(0, g_park.future_day_count);
+}
+
 static void test_clear_preserves_park_name(void)
 {
 	parkdata_set_park_name("Magic Kingdom");
@@ -230,6 +307,10 @@ int main(void)
 	RUN_TEST(test_show_times_capped);
 	RUN_TEST(test_malformed_lines_skipped);
 	RUN_TEST(test_truncation_at_caps);
+	RUN_TEST(test_future_days_parse);
+	RUN_TEST(test_future_days_capped);
+	RUN_TEST(test_future_days_malformed_skipped);
+	RUN_TEST(test_future_days_cleared);
 	RUN_TEST(test_clear_preserves_park_name);
 	RUN_TEST(test_length_clamping);
 	RUN_TEST(test_all_closed);

@@ -255,6 +255,94 @@ test("getTodaySchedule null when nothing matches", function () {
   assert.strictEqual(lib.getTodaySchedule(SCHED, "2026-08-01", nowMs), null);
 });
 
+// ── getUpcomingSchedule ──────────────────────────────────────────────────
+
+var UPCOMING_SCHED = [
+  // Out of order on purpose — the helper must sort by date.
+  { date: "2026-07-31", type: "OPERATING",
+    openingTime: "2026-07-31T08:30:00-04:00", closingTime: "2026-08-01T01:00:00-04:00" },
+  { date: "2026-07-28", type: "OPERATING",
+    openingTime: "2026-07-28T09:00:00-04:00", closingTime: "2026-07-28T22:00:00-04:00" },
+  { date: "2026-07-29", type: "TICKETED_EVENT",
+    openingTime: "2026-07-29T07:00:00-04:00", closingTime: "2026-07-29T09:00:00-04:00" },
+  { date: "2026-07-29", type: "OPERATING",
+    openingTime: "2026-07-29T09:00:00-04:00", closingTime: "2026-07-29T22:00:00-04:00" },
+  { date: "2026-07-30", type: "OPERATING",
+    openingTime: "2026-07-30T09:00:00-04:00", closingTime: "2026-07-30T22:00:00-04:00" },
+  // Duplicate OPERATING entry for a date — first (after sort) wins.
+  { date: "2026-07-30", type: "OPERATING",
+    openingTime: "2026-07-30T10:00:00-04:00", closingTime: "2026-07-30T23:00:00-04:00" },
+  { date: "2026-08-01", type: "INFO" },  // non-OPERATING, no times
+];
+
+test("getUpcomingSchedule from today onward, ordered, deduped", function () {
+  // Pinned midday on the 29th: the 28th is fully past (dropped), the
+  // 29th's session is still open (kept), then the 30th and 31st.
+  var nowMs = new Date("2026-07-29T12:00:00-04:00").getTime();
+  var got = lib.getUpcomingSchedule(UPCOMING_SCHED, "2026-07-29", 7, nowMs);
+  assert.deepStrictEqual(got, [
+    { date: "2026-07-29", o: "09:00", c: "22:00" },
+    { date: "2026-07-30", o: "09:00", c: "22:00" },
+    { date: "2026-07-31", o: "08:30", c: "01:00" },
+  ]);
+});
+
+test("getUpcomingSchedule maxDays cap", function () {
+  var nowMs = new Date("2026-07-29T12:00:00-04:00").getTime();
+  var got = lib.getUpcomingSchedule(UPCOMING_SCHED, "2026-07-29", 2, nowMs);
+  assert.strictEqual(got.length, 2);
+  assert.strictEqual(got[0].date, "2026-07-29");
+  assert.strictEqual(got[1].date, "2026-07-30");
+});
+
+test("getUpcomingSchedule keeps a still-open overnight session", function () {
+  // Park east of UTC thinking: local "today" (the 1st) has rolled past
+  // the schedule's last date, but the 31st's session closes at 1 AM on
+  // the 1st and is still open — it must be kept.
+  var nowMs = new Date("2026-08-01T00:30:00-04:00").getTime();
+  var got = lib.getUpcomingSchedule(UPCOMING_SCHED, "2026-08-01", 7, nowMs);
+  assert.deepStrictEqual(got, [
+    { date: "2026-07-31", o: "08:30", c: "01:00" },
+  ]);
+});
+
+test("getUpcomingSchedule empty when nothing upcoming", function () {
+  var nowMs = new Date("2026-08-02T12:00:00Z").getTime();
+  assert.deepStrictEqual(
+    lib.getUpcomingSchedule(UPCOMING_SCHED, "2026-08-02", 7, nowMs), []);
+  assert.deepStrictEqual(lib.getUpcomingSchedule([], "2026-07-29", 7, 0), []);
+});
+
+// ── encodeParkData F| lines ──────────────────────────────────────────────
+
+test("encodeParkData emits F| lines from data.f", function () {
+  var out = lib.encodeParkData({
+    sc: { o: "09:00", c: "22:00" },
+    u: 1753776000000,
+    a: [["abcd1234", "Space Mountain", "O", 45]],
+    h: [],
+    f: [
+      { date: "2026-07-29", o: "09:00", c: "22:00" },
+      { date: "2026-07-30", o: "08:30", c: "01:00" },
+    ],
+  });
+  var lines = out.split("\n");
+  assert.strictEqual(lines[2], "A|abcd1234|Space Mountain|O|45");
+  assert.strictEqual(lines[3], "F|2026-07-29|09:00|22:00");
+  assert.strictEqual(lines[4], "F|2026-07-30|08:30|01:00");
+  assert.strictEqual(lines.length, 5);
+});
+
+test("encodeParkData without f is byte-identical to the old shape", function () {
+  // Absent and empty f must both emit nothing — old payloads (and the
+  // watch's pre-F parser) see exactly the same bytes as before.
+  var base = { sc: { o: "9 AM", c: "10 PM" }, u: 1753776000000, a: [], h: [] };
+  var withoutF = lib.encodeParkData(base);
+  assert.strictEqual(withoutF, "9 AM|10 PM\n1753776000");
+  base.f = [];
+  assert.strictEqual(lib.encodeParkData(base), withoutF);
+});
+
 // ── classifyRegion ───────────────────────────────────────────────────────
 
 test("classifyRegion sample points", function () {

@@ -17,6 +17,8 @@
 #define MAX_NAME_LEN 40
 #define MAX_TIME_LEN 12    /* "10:30 PM" + slack */
 #define MAX_HOURS_LEN 12
+#define MAX_FUTURE_DAYS 7  /* ~a week of glance slices; AppGlance caps at 8 */
+#define DATE_STR_LEN 11    /* "YYYY-MM-DD" + NUL */
 
 typedef struct {
 	char id[MAX_ID_LEN];
@@ -33,6 +35,14 @@ typedef struct {
 	uint8_t time_count;
 } show_t;
 
+/* One upcoming OPERATING day from the wire's F| lines — feeds the
+ * multi-day AppGlance slice queue (main.c publish_glance). */
+typedef struct {
+	char date[DATE_STR_LEN];    /* "YYYY-MM-DD", park-local */
+	char open[MAX_HOURS_LEN];   /* wire "HH:MM" */
+	char close[MAX_HOURS_LEN];
+} future_day_t;
+
 typedef struct {
 	attraction_t attractions[MAX_ATTRACTIONS];
 	show_t shows[MAX_SHOWS];
@@ -41,6 +51,8 @@ typedef struct {
 	char schedule_open[MAX_HOURS_LEN];
 	char schedule_close[MAX_HOURS_LEN];
 	bool has_schedule;
+	future_day_t future_days[MAX_FUTURE_DAYS];
+	uint8_t future_day_count;
 	uint32_t last_updated_secs;  /* seconds since epoch */
 	char park_name[24];
 } park_data_t;
