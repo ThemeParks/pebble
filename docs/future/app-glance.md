@@ -1,4 +1,27 @@
-# AppGlance — Design Notes
+# AppGlance — Implemented
+
+> Shipped on branch `feat/app-glance`. The original design notes are kept
+> below; see "What changed" at the end for the implementation summary.
+
+## Follow-ups (not yet implemented)
+
+- **Template countdowns**: render the hours rung with an AppGlance
+  subtitle template predicate (`time_until(<close_epoch>)` → "closes in
+  45 min", "opens in 2h" pre-open) instead of static "9 AM - 10 PM" —
+  the launcher evaluates the template at render time, so the text stays
+  continuously accurate with zero background execution.
+- **Multi-day slice queue**: every published slice expires (waits after
+  30 min, hours at that day's close), so after the last expiry the
+  launcher shows only the app name — a user who doesn't open the app for
+  weeks gets nothing rather than something stale ("absence over
+  staleness"). AppGlance accepts up to 8 slices per reload, advancing as
+  each expires, and the schedule endpoint already returns multi-week
+  data (PKJS currently filters to today). Queueing ~a week of per-day
+  hours slices (today's countdown, then tomorrow's hours expiring at
+  tomorrow's close, ...) keeps the glance accurate for about a week
+  untouched. Needs the wire payload to carry future days' hours. Beyond
+  that horizon, only server-pushed timeline topics stay live
+  (docs/future/timeline-pins.md).
 
 ## Concept
 
@@ -48,3 +71,35 @@ Notes:
 ## Scope
 
 Small. One new function in main.c, one pure helper in format.c + unit tests, no protocol changes. Test in the emulator by exiting the app and screenshotting the launcher.
+
+## What changed
+
+- **`src/c/format.{c,h}`**: pure, host-testable glance composer.
+  - `format_glance_line(const glance_input_t *, use_24h, out, outsz)` walks
+    the priority ladder and returns which rung it used
+    (`GLANCE_RUNG_HOURS` → `"<Park> · <open> - <close>"`,
+    `GLANCE_RUNG_WAIT` → `"<Ride> <N>m · <Park>"`, `GLANCE_RUNG_NONE` →
+    empty string, publish nothing). Empty park name drops the
+    prefix/suffix instead of rendering a dangling `" · "`.
+  - `format_hours_current(now_min, open_min, close_min)` — the pure
+    "are these hours still worth showing" decision on minutes-since-
+    midnight, including the past-midnight-close wraparound. Pre-open
+    counts as current (hours are informative before the gates open).
+  - `GLANCE_WAIT_MAX_AGE_SECS` (30 min) — freshness cutoff for the wait
+    rung, enforced both by the caller and inside the composer.
+- **`src/c/main.c`**: `publish_glance()` runs in `deinit()` after
+  `app_event_loop()` returns. It resolves the last-viewed park
+  (`s_current_park`, falling back to the persisted last park in the
+  per-destination builds; the uber build publishes nothing when exiting
+  from a picker), pulls hours from `g_park` or the persist cache, does
+  the HH:MM→minutes and close→epoch math (`mktime`, +1 day for
+  past-midnight closes), picks the headline wait (shortest operating
+  favourite, else shortest operating overall), and calls
+  `app_glance_reload`. The slice expires at park close (hours rung) or
+  now+30 min (wait rung); a session that adds no slice clears any
+  previous glance. Logs `glance: <text>` / `glance: none` on every exit.
+- **`tests/unit/test_format.c`**: covers both rungs (12h/24h), ladder
+  precedence, the none case, empty park name, truncation safety, and
+  `format_hours_current` (daytime, pre-open, after close, past-midnight
+  close at 23:00/00:30/02:00).
+- No PKJS or protocol changes, as designed.

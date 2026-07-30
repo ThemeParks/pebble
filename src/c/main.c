@@ -18,6 +18,7 @@
 #include "config.h"
 #include "parkdata.h"
 #include "storage.h"
+#include "format.h"
 #include "api.h"
 #include "park_picker.h"
 #include "park_view.h"
@@ -424,6 +425,181 @@ static void load_park_force(int park_idx)
 	load_park_ex(park_idx, true);
 }
 
+/* --- app glance ------------------------------------------------------ */
+
+/* The composed glance line lives here because subtitle_template_string
+ * is read when the reload session commits, after prime_glance returns —
+ * a stack buffer would be gone by then. */
+static char s_glance_buf[64];
+static time_t s_glance_expiry;
+
+/* Strict wire "HH:MM" → minutes since midnight, or -1. Mirrors the
+ * parse in format_clock_time; a -1 here means a legacy cached string
+ * ("9 AM") we can't do time math on. */
+static int glance_hhmm_to_min(const char *hhmm)
+{
+	if (!hhmm
+	    || hhmm[0] < '0' || hhmm[0] > '9'
+	    || hhmm[1] < '0' || hhmm[1] > '9'
+	    || hhmm[2] != ':'
+	    || hhmm[3] < '0' || hhmm[3] > '9'
+	    || hhmm[4] < '0' || hhmm[4] > '9'
+	    || hhmm[5] != '\0') return -1;
+	int hh = (hhmm[0] - '0') * 10 + (hhmm[1] - '0');
+	int mm = (hhmm[3] - '0') * 10 + (hhmm[4] - '0');
+	if (hh > 23 || mm > 59) return -1;
+	return hh * 60 + mm;
+}
+
+/* Today's close as an epoch — the hours slice's expiration, so a stale
+ * glance never outlives its truth. */
+static time_t glance_close_epoch(time_t now, int now_min,
+                                 int open_min, int close_min)
+{
+	struct tm t = *localtime(&now);
+	t.tm_hour = close_min / 60;
+	t.tm_min = close_min % 60;
+	t.tm_sec = 0;
+	/* Past-midnight close (close < open): unless we're already in the
+	 * small hours before it (now < close), the close lands on tomorrow's
+	 * date — bump the day and let mktime normalise any month rollover. */
+	if (close_min < open_min && now_min >= close_min) t.tm_mday += 1;
+	return mktime(&t);
+}
+
+/* Headline attraction: shortest wait among operating favourites; if the
+ * user has no operating favourites, shortest operating overall. */
+static const attraction_t *glance_headline(const char *park_id)
+{
+	const attraction_t *best_fav = NULL, *best_any = NULL;
+	for (int i = 0; i < g_park.attraction_count; i++) {
+		const attraction_t *a = &g_park.attractions[i];
+		if (a->status != 'O' || a->wait < 0) continue;
+		if (!best_any || a->wait < best_any->wait) best_any = a;
+		if (storage_is_favourite(park_id, FAV_ATTRACTIONS, a->id)
+		    && (!best_fav || a->wait < best_fav->wait)) best_fav = a;
+	}
+	return best_fav ? best_fav : best_any;
+}
+
+static void prime_glance(AppGlanceReloadSession *session,
+                         size_t limit, void *context)
+{
+	(void)context;
+	/* An empty buffer means the ladder produced nothing — adding no
+	 * slice here is what clears any previous glance back to the plain
+	 * app name. */
+	if (limit < 1 || s_glance_buf[0] == '\0') return;
+	const AppGlanceSlice slice = {
+		.layout = {
+			.icon = APP_GLANCE_SLICE_DEFAULT_ICON,
+			.subtitle_template_string = s_glance_buf,
+		},
+		.expiration_time = s_glance_expiry,
+	};
+	AppGlanceResult res = app_glance_add_slice(session, slice);
+	if (res != APP_GLANCE_RESULT_SUCCESS) {
+		APP_LOG(APP_LOG_LEVEL_WARNING, "glance: add_slice failed (%d)",
+		        (int)res);
+	}
+}
+
+/* Build the glance line for the last-viewed park and hand it to the
+ * launcher. Called from deinit(), i.e. every app exit. */
+static void publish_glance(void)
+{
+	s_glance_buf[0] = '\0';
+	s_glance_expiry = 0;
+
+	time_t now = time(NULL);
+	struct tm lt = *localtime(&now);
+	int now_min = lt.tm_hour * 60 + lt.tm_min;
+
+	int idx = s_current_park;
+#ifndef MULTI_DESTINATION
+	/* Exited from a picker (s_current_park == -1): fall back to the
+	 * persisted last park so the launcher can still show its cached
+	 * hours. In the uber build we skip this — after a destination
+	 * switch g_parks may not even contain the persisted park id. */
+	if (idx < 0) {
+		const char *last = storage_get_last_park();
+		if (last) {
+			for (int i = 0; i < NUM_PARKS; i++) {
+				if (strcmp(g_parks[i].id, last) == 0) { idx = i; break; }
+			}
+		}
+	}
+#endif
+
+	if (idx >= 0) {
+		const char *park_id = g_parks[idx].id;
+		glance_input_t in = {
+			.park_name = g_parks[idx].name,
+			.wait_mins = -1,
+		};
+
+		/* Hours: prefer the live fetch (g_park only holds this park's
+		 * data when it's still current), else the persisted cache —
+		 * which works offline and when the fetch never completed. */
+		char open_buf[PARK_HOURS_STR_LEN], close_buf[PARK_HOURS_STR_LEN];
+		const char *open_s = NULL, *close_s = NULL;
+		if (idx == s_current_park && g_park.has_schedule) {
+			open_s = g_park.schedule_open;
+			close_s = g_park.schedule_close;
+		} else if (storage_get_park_hours(park_id, open_buf, close_buf)) {
+			open_s = open_buf;
+			close_s = close_buf;
+		}
+		time_t close_epoch = 0;
+		if (open_s && close_s) {
+			int open_min = glance_hhmm_to_min(open_s);
+			int close_min = glance_hhmm_to_min(close_s);
+			/* Any parse failure (legacy cached strings) → hours are not
+			 * "current"; the ladder falls through to the wait rung. */
+			if (open_min >= 0 && close_min >= 0
+			    && format_hours_current(now_min, open_min, close_min)) {
+				close_epoch = glance_close_epoch(now, now_min,
+				                                 open_min, close_min);
+				if (close_epoch > now) {
+					in.has_schedule = true;
+					in.hours_current = true;
+					in.open_hhmm = open_s;
+					in.close_hhmm = close_s;
+				}
+			}
+		}
+
+		/* Headline wait: only from live data for this park, and only
+		 * fresh enough that the launcher won't show a fossil. */
+		if (idx == s_current_park && g_park.last_updated_secs != 0
+		    && now >= (time_t)g_park.last_updated_secs) {
+			uint32_t age = (uint32_t)now - g_park.last_updated_secs;
+			if (age < GLANCE_WAIT_MAX_AGE_SECS) {
+				const attraction_t *a = glance_headline(park_id);
+				if (a) {
+					in.ride_name = a->name;
+					in.wait_mins = a->wait;
+					in.wait_age_secs = age;
+				}
+			}
+		}
+
+		int rung = format_glance_line(&in, clock_is_24h_style(),
+		                              s_glance_buf, sizeof(s_glance_buf));
+		if (rung == GLANCE_RUNG_HOURS) s_glance_expiry = close_epoch;
+		else if (rung == GLANCE_RUNG_WAIT)
+			s_glance_expiry = now + GLANCE_WAIT_MAX_AGE_SECS;
+		else s_glance_buf[0] = '\0';
+	}
+
+	APP_LOG(APP_LOG_LEVEL_INFO, "glance: %s",
+	        s_glance_buf[0] ? s_glance_buf : "none");
+	/* Always reload — a session that adds no slice clears any previous
+	 * one, so an outdated glance can't survive an exit that produced
+	 * nothing. */
+	app_glance_reload(prime_glance, NULL);
+}
+
 /* --- app lifecycle -------------------------------------------------- */
 
 static void init(void)
@@ -490,6 +666,9 @@ static void deinit(void)
 #ifdef TEST_MODE
 	if (s_test_timer) app_timer_cancel(s_test_timer);
 #endif
+	/* Runs after app_event_loop() returns — the documented place to
+	 * reload the glance so the launcher shows it once we're gone. */
+	publish_glance();
 	api_deinit();
 }
 

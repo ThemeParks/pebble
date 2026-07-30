@@ -35,3 +35,41 @@ bool format_locale_uses_miles(const char *locale);
  * " · Nm" under an hour, " · Nh" beyond. */
 void format_age_suffix(uint32_t now_secs, uint32_t updated_secs,
                        char *out, int outsz);
+
+/* --- AppGlance launcher subtitle ------------------------------------- */
+
+/* Wait data older than this must not reach the launcher — a stale wait
+ * on the glance would be worse than showing nothing. Shared with main.c,
+ * which also uses it as the wait slice's expiration horizon. */
+#define GLANCE_WAIT_MAX_AGE_SECS (30 * 60)
+
+/* Which rung of the glance priority ladder produced the line. */
+enum {
+	GLANCE_RUNG_NONE  = 0,  /* nothing usable — publish no slice */
+	GLANCE_RUNG_HOURS = 1,  /* "<Park> · <open> - <close>" */
+	GLANCE_RUNG_WAIT  = 2,  /* "<Ride> <N>m · <Park>" */
+};
+
+typedef struct {
+	const char *park_name;   /* NULL/"" → line renders without it */
+	bool has_schedule;       /* open/close strings hold today's hours */
+	const char *open_hhmm;   /* wire "HH:MM" (legacy strings pass through) */
+	const char *close_hhmm;
+	bool hours_current;      /* caller's call: close is still in the future */
+	const char *ride_name;   /* headline attraction, NULL/"" if none */
+	int wait_mins;           /* its wait, -1 == none */
+	uint32_t wait_age_secs;  /* age of the wait data (now - last update) */
+} glance_input_t;
+
+/* Compose the glance subtitle per the priority ladder: current hours
+ * beat a fresh headline wait beats nothing. Returns the GLANCE_RUNG_*
+ * used; out is "" (and NONE returned) when no rung applies. Truncates
+ * safely into outsz. */
+int format_glance_line(const glance_input_t *in, bool use_24h,
+                       char *out, int outsz);
+
+/* Are park hours still worth showing, given minutes-since-midnight?
+ * True from midnight up to close (pre-open hours are informative), with
+ * past-midnight closes (close < open) handled — see the impl comment.
+ * Out-of-range inputs (outside 0..1439) return false. */
+bool format_hours_current(int now_min, int open_min, int close_min);
