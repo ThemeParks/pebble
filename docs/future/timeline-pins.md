@@ -5,8 +5,12 @@
 Push Pebble timeline pins so park info lives in the watch's past/future
 timeline, extending the app's presence beyond explicit launches:
 
-- **Park hours pin** for today at the last-used park: pin at opening time,
-  "Magic Kingdom · 9 AM - 10 PM", with an "Open app" action.
+- **Park hours pin** for today at each of the user's parks: pin at
+  opening time, "Magic Kingdom · 9 AM - 10 PM", with an "Open app"
+  action. "The user's parks" = the My Parks multi-select from the
+  phone-side settings page (docs/future/phone-settings.md) when set —
+  locals want several specific parks, not just the last-viewed one —
+  falling back to the last-used park otherwise.
 - **Favourited show pins**: one pin per upcoming showtime of a favourited
   show ("Fantasmic! · 9:30 PM"). The user already told us they care —
   showtimes are exactly the kind of fixed-time event the timeline is for.
@@ -27,6 +31,20 @@ per-user pins).
   (`FAV_SHOWS_SYNC`: comma-joined short ids) sent whenever show favourites
   change; PKJS caches it in localStorage. This sync is also a prerequisite
   for the geofenced ride alerts design (docs/future/ride-alerts.md).
+
+## Server-pushed topic pins (the only live-background channel)
+
+Timeline sync is the one channel that updates without the watch app
+running: the phone syncs pins from the timeline web service on its own
+schedule (~15-30 min). Pins can be pushed server-side to shared topics
+(`Pebble.timelineSubscribe("waits-<parkId>")` per My Park), and
+ThemeParks.wiki owns the backend with the data — an hourly "park pulse"
+pin (waits digest) per park topic is feasible. This is the only way to
+beat the "glance is a snapshot of last app use" constraint, at the cost
+of real server infrastructure (per-topic push jobs, rate limiting; the
+timeline is not for high-frequency updates — hourly is the honest
+ceiling). Separate opt-in feature if ever built; everything else in
+this doc works without it.
 
 ## Caveats
 
