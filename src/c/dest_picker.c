@@ -11,8 +11,8 @@
  *                 one row per region. Selecting a region pushes the
  *                 region window; selecting a nearby row picks it.
  *   Region window: that region's destinations grouped into letter
- *                 sections. Single UP/DOWN scrolls; double-press jumps
- *                 to the previous/next letter. SELECT picks.
+ *                 sections. UP/DOWN scroll (repeating while held);
+ *                 SELECT picks.
  */
 
 #include "config.h"
@@ -23,6 +23,7 @@
 #include "dest_parse.h"
 #include "colours.h"
 #include "format.h"
+#include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
 #include <stdlib.h>
@@ -458,33 +459,17 @@ static void region_draw_row(GContext *gctx, const Layer *cell,
                   menu_cell_layer_is_highlighted(cell));
 }
 
-/* Click config: single UP/DOWN scrolls one row (repeating while held);
- * a double-press jumps to the previous/next letter section. Both fire
- * on a double-press — two harmless single-scrolls followed by the jump,
- * which sets an absolute position — so ordinary scrolling stays
- * zero-latency and the double-press still lands on the letter start. */
+/* Click config: single UP/DOWN scrolls one row, repeating while held —
+ * no letter-jump gesture. A multi-click subscription would make the
+ * firmware delay every single click by its ~300ms disambiguation
+ * window (see ui_common.h); the letter SECTION HEADERS stay, giving
+ * fast-scrolling users their place in the alphabet. */
 
 static void region_scroll_click(ClickRecognizerRef rec, void *ctx)
 {
     bool up = click_recognizer_get_button_id(rec) == BUTTON_ID_UP;
     menu_layer_set_selected_next(s_region_menu, up,
-                                 MenuRowAlignCenter, true);
-}
-
-static void region_letter_jump_click(ClickRecognizerRef rec, void *ctx)
-{
-    if (s_num_letters == 0) return;
-    bool up = click_recognizer_get_button_id(rec) == BUTTON_ID_UP;
-    MenuIndex cur = menu_layer_get_selected_index(s_region_menu);
-    int sec = cur.section;
-    if (up) {
-        if (sec > 0) sec--;
-    } else {
-        if (sec < s_num_letters - 1) sec++;
-    }
-    menu_layer_set_selected_index(s_region_menu,
-        (MenuIndex){ .section = sec, .row = 0 },
-        MenuRowAlignTop, true);
+                                 MenuRowAlignCenter, false);
 }
 
 static void region_select_click(ClickRecognizerRef rec, void *ctx)
@@ -503,10 +488,8 @@ static void region_back_click(ClickRecognizerRef rec, void *ctx)
 
 static void region_click_config(void *ctx)
 {
-    window_single_repeating_click_subscribe(BUTTON_ID_UP, 100, region_scroll_click);
-    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 100, region_scroll_click);
-    window_multi_click_subscribe(BUTTON_ID_UP, 2, 2, 0, true, region_letter_jump_click);
-    window_multi_click_subscribe(BUTTON_ID_DOWN, 2, 2, 0, true, region_letter_jump_click);
+    window_single_repeating_click_subscribe(BUTTON_ID_UP, SCROLL_REPEAT_MS, region_scroll_click);
+    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, SCROLL_REPEAT_MS, region_scroll_click);
     window_single_click_subscribe(BUTTON_ID_SELECT, region_select_click);
     window_single_click_subscribe(BUTTON_ID_BACK, region_back_click);
 }
