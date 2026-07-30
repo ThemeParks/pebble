@@ -496,8 +496,12 @@ static void switch_page(page_t p)
 	remember_selection();
 }
 
-/* Jump selection by PAGE_STEP rows, clamped to the list bounds. */
-static void jump_rows(int delta)
+/* Move the selection by `delta` rows, clamped to the list bounds.
+ * Single-row moves snap without animation — the eased scroll reads as
+ * input lag on a one-row hop, especially while the button repeats.
+ * The coarse double-press jump keeps the animation: big motion without
+ * it looks like a glitch. */
+static void jump_rows(int delta, bool animate)
 {
 	if (!s_menu || s_sorted_count == 0) return;
 	MenuIndex cur = menu_layer_get_selected_index(s_menu);
@@ -505,17 +509,17 @@ static void jump_rows(int delta)
 	if (target < 0) target = 0;
 	if (target >= s_sorted_count) target = s_sorted_count - 1;
 	MenuIndex next = { .section = 0, .row = (uint16_t)target };
-	menu_layer_set_selected_index(s_menu, next, MenuRowAlignCenter, true);
+	menu_layer_set_selected_index(s_menu, next, MenuRowAlignCenter, animate);
 }
 
 static void up_handler(ClickRecognizerRef ref, void *ctx)
 {
-	jump_rows(-1);
+	jump_rows(-1, false);
 }
 
 static void down_handler(ClickRecognizerRef ref, void *ctx)
 {
-	jump_rows(1);
+	jump_rows(1, false);
 }
 
 /* Double-press UP/DOWN: coarse jump. The two single-row moves from the
@@ -525,7 +529,7 @@ static void down_handler(ClickRecognizerRef ref, void *ctx)
 static void page_jump_handler(ClickRecognizerRef ref, void *ctx)
 {
 	bool up = click_recognizer_get_button_id(ref) == BUTTON_ID_UP;
-	jump_rows(up ? -PAGE_STEP : PAGE_STEP);
+	jump_rows(up ? -PAGE_STEP : PAGE_STEP, true);
 }
 
 static void select_handler(ClickRecognizerRef ref, void *ctx)
