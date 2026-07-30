@@ -33,9 +33,10 @@
 #define ROW_HEIGHT_WAITS 26
 #define ROW_HEIGHT_SHOWS 42
 
-/* Up/Down jump this many rows at a time — "half-page" scroll feels right
- * on a watch where the list is long (40 attractions) and row-by-row is
- * tedious. Matches the old JS behaviour. */
+/* Up/Down move the cursor ONE row (hold to repeat) — the cursor is the
+ * long-press-favourite target, so it must be able to land on every ride.
+ * A double-press jumps this many rows for fast traversal of a 40-row
+ * list; same interaction language as the dest picker's letter jump. */
 #define PAGE_STEP 6
 
 typedef enum { PAGE_WAITS = 0, PAGE_SHOWS = 1 } page_t;
@@ -509,12 +510,22 @@ static void jump_rows(int delta)
 
 static void up_handler(ClickRecognizerRef ref, void *ctx)
 {
-	jump_rows(-PAGE_STEP);
+	jump_rows(-1);
 }
 
 static void down_handler(ClickRecognizerRef ref, void *ctx)
 {
-	jump_rows(PAGE_STEP);
+	jump_rows(1);
+}
+
+/* Double-press UP/DOWN: coarse jump. The two single-row moves from the
+ * presses themselves land first, then this adds the page step — fine
+ * for a deliberately imprecise "get me down the list" gesture, and it
+ * keeps single presses zero-latency. */
+static void page_jump_handler(ClickRecognizerRef ref, void *ctx)
+{
+	bool up = click_recognizer_get_button_id(ref) == BUTTON_ID_UP;
+	jump_rows(up ? -PAGE_STEP : PAGE_STEP);
 }
 
 static void select_handler(ClickRecognizerRef ref, void *ctx)
@@ -574,8 +585,10 @@ static void click_config(Window *w)
 	 * With a long-click subscription in place, the plain SELECT click
 	 * fires on release (before the 500ms threshold) — page switching
 	 * keeps working unchanged. */
-	window_single_click_subscribe(BUTTON_ID_UP, up_handler);
-	window_single_click_subscribe(BUTTON_ID_DOWN, down_handler);
+	window_single_repeating_click_subscribe(BUTTON_ID_UP, 100, up_handler);
+	window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 100, down_handler);
+	window_multi_click_subscribe(BUTTON_ID_UP, 2, 2, 0, true, page_jump_handler);
+	window_multi_click_subscribe(BUTTON_ID_DOWN, 2, 2, 0, true, page_jump_handler);
 	window_single_click_subscribe(BUTTON_ID_SELECT, select_handler);
 	window_long_click_subscribe(BUTTON_ID_SELECT, 500, long_select_handler, NULL);
 	window_single_click_subscribe(BUTTON_ID_BACK, back_handler);
