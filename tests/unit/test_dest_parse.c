@@ -134,6 +134,34 @@ static void test_caps(void)
 	ASSERT_EQ_INT(MAX_SECTIONS + 3, g_dest_count);
 }
 
+static void test_fixed_marker(void)
+{
+	uint16_t off = 0;
+
+	/* Marked payload: true, offset lands on the first park row. */
+	const char *marked = "M|fixed\nid1|Efteling|circle|pink\n";
+	ASSERT_TRUE(dest_parks_fixed_marker(marked, (uint16_t)strlen(marked), &off));
+	ASSERT_EQ_INT(8, off);
+	ASSERT_TRUE(strncmp(marked + off, "id1|", 4) == 0);
+
+	/* Marker-only payload (degenerate but well-formed). */
+	ASSERT_TRUE(dest_parks_fixed_marker("M|fixed", 7, &off));
+	ASSERT_EQ_INT(7, off);
+
+	/* Unmarked payload: false, offset 0. */
+	const char *plain = "id1|Efteling|circle|pink\n";
+	ASSERT_TRUE(!dest_parks_fixed_marker(plain, (uint16_t)strlen(plain), &off));
+	ASSERT_EQ_INT(0, off);
+
+	/* Near-misses must not match: prefix without line break, park id
+	 * that happens to start with M|, short/empty payloads. */
+	ASSERT_TRUE(!dest_parks_fixed_marker("M|fixedX|name|i|c\n", 18, &off));
+	ASSERT_EQ_INT(0, off);
+	ASSERT_TRUE(!dest_parks_fixed_marker("M|fix", 5, &off));
+	ASSERT_TRUE(!dest_parks_fixed_marker("", 0, &off));
+	ASSERT_TRUE(!dest_parks_fixed_marker(NULL, 10, &off));
+}
+
 int main(void)
 {
 	RUN_TEST(test_basic_sections);
@@ -143,5 +171,6 @@ int main(void)
 	RUN_TEST(test_malformed_lines_skipped);
 	RUN_TEST(test_name_and_id_truncation);
 	RUN_TEST(test_caps);
+	RUN_TEST(test_fixed_marker);
 	return unit_summary();
 }

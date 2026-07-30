@@ -91,23 +91,37 @@ app was closed.
   the new destination immediately (same path as a watch-side
   DEST_SELECT) and that counts as the session's fixed serve.
 
+### Fixed-mode navigation (implemented after device testing)
+
+Device testing showed the original v1 plan (leave watch nav alone) was
+wrong: BACK from a fixed single-park destination dumped the user into
+the destination picker they had explicitly opted out of. Fixed mode now
+behaves exactly like a per-destination build:
+
+- Every fixed-mode DEST_PARKS payload leads with an **`M|fixed`
+  marker line** (`buildParkLines` in lib.js; parsed watch-side by
+  `dest_parks_fixed_marker` in dest_parse.c). An unmarked payload
+  (watch-side pick, or "choose on watch" restored) clears the mode.
+- In fixed mode the destination picker is never shown: single-park BACK
+  **exits the app** (publishing the glance on the way out); multi-park
+  destinations use the park picker as the root window, so BACK from it
+  exits too.
+- PKJS answers **every** dest-list request AND overrides DEST_SELECT
+  (including the watch's startup resume of its persisted last
+  destination) with the fixed destination while the setting is active —
+  launching always lands in the fixed destination. The old
+  once-per-session serve guard is gone; the request loop it prevented
+  cannot occur now that fixed mode never re-requests the list.
+
 ### v1 honest limitations
 
-- **Watch nav in fixed mode is unchanged**: the destination picker
-  remains reachable beneath the park picker, and picking a different
-  destination there works for the rest of the session — the fixed
-  destination re-asserts itself on the next watch app launch. Making
-  the park picker the root window in fixed mode (BACK exits, like a
-  per-destination build) is deferred; nav-flow surgery wasn't worth the
-  risk before emulator verification.
-- A watch-side `last_destination` (persisted by an on-watch pick)
-  resumes via DEST_SELECT, which the fixed mode deliberately does not
-  override — such users get their picked destination on resume until
-  they clear it by navigating; users who never picked on-watch always
-  launch into the fixed destination.
-- A fixed `destId` that disappears from the API self-heals: the fixed
-  serve sends nothing, the watch's watchdog re-requests, and the
-  second request returns the normal list.
+- A fixed `destId` that disappears from the API no longer self-heals
+  within a session (every request is answered with the fixed serve,
+  which sends nothing for an unknown id) — changing the setting on the
+  phone recovers. Acceptable: destination ids are stable.
+- Switching fixed → "choose on watch" while the watch app is running
+  takes effect on the next destination pick or relaunch (no unmarked
+  payload is pushed proactively).
 - Saving from a degraded page (dest list unavailable) writes
   `destMode: "watch"` — a previously fixed destination is cleared
   rather than preserved.
@@ -162,8 +176,6 @@ mode. The settings JSON's `v` field exists so this can be added as e.g.
 
 ### Other deferred items
 
-- **Fixed-mode watch nav**: park picker as root window, BACK matching
-  the per-destination builds (see v1 limitations above).
 - **Units (km/mi) override**, refresh cadence, and similar — versioned
   settings JSON makes these cheap to add.
 - Should "Fixed destination" also pre-select a *park*? Leaning no:

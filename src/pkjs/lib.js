@@ -251,6 +251,22 @@ function buildDestLines(dests, userLoc) {
   return lines;
 }
 
+// Build the DEST_PARKS_DATA payload lines for a destination's parks:
+//   M|fixed                  (only when isFixed) — tells the watch these
+//                            parks came from the phone-side fixed
+//                            destination setting, so it hides the
+//                            destination picker and BACK exits
+//   id|name|icon|color       one line per park
+function buildParkLines(parks, isFixed) {
+  var lines = [];
+  if (isFixed) lines.push("M|fixed");
+  for (var i = 0; i < parks.length; i++) {
+    var pk = parks[i];
+    lines.push(pk.id + "|" + pk.name + "|" + pk.icon + "|" + pk.color);
+  }
+  return lines;
+}
+
 // Whether a park-data request should be answered from the phone-side
 // cache: it must exist, still be fresh, and the watch must not have set
 // the force flag (manual "Refresh Data" — the user wants now-data).
@@ -500,6 +516,7 @@ module.exports = {
   classifyRegion: classifyRegion,
   haversineDist: haversineDist,
   buildDestLines: buildDestLines,
+  buildParkLines: buildParkLines,
   filterLiveData: filterLiveData,
   defaultSettings: defaultSettings,
   parseSettings: parseSettings,

@@ -408,6 +408,33 @@ test("buildDestLines region destinations sorted by name", function () {
   assert.strictEqual(lines[na + 2].slice(0, 6), "D|wdw|");
 });
 
+// ── buildParkLines ───────────────────────────────────────────────────────
+
+var PARKS_FIXTURE = [
+  { id: "p1", name: "Efteling", icon: "castle", color: "purple" },
+  { id: "p2", name: "Second Park", icon: "circle", color: "blue" },
+];
+
+test("buildParkLines plain payload has no marker", function () {
+  var lines = lib.buildParkLines(PARKS_FIXTURE, false);
+  assert.deepStrictEqual(lines, [
+    "p1|Efteling|castle|purple",
+    "p2|Second Park|circle|blue",
+  ]);
+});
+
+test("buildParkLines fixed payload leads with M|fixed", function () {
+  var lines = lib.buildParkLines(PARKS_FIXTURE, true);
+  assert.strictEqual(lines[0], "M|fixed");
+  assert.strictEqual(lines.length, 3);
+  assert.strictEqual(lines[1], "p1|Efteling|castle|purple");
+});
+
+test("buildParkLines empty parks", function () {
+  assert.deepStrictEqual(lib.buildParkLines([], false), []);
+  assert.deepStrictEqual(lib.buildParkLines([], true), ["M|fixed"]);
+});
+
 // ── filterLiveData ───────────────────────────────────────────────────────
 
 test("filterLiveData attractions", function () {

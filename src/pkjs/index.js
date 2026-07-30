@@ -24,6 +24,7 @@ var getUpcomingSchedule = lib.getUpcomingSchedule;
 var classifyRegion = lib.classifyRegion;
 var haversineDist = lib.haversineDist;
 var buildDestLines = lib.buildDestLines;
+var buildParkLines = lib.buildParkLines;
 var filterLiveData = lib.filterLiveData;
 var parseSettings = lib.parseSettings;
 var encodeSettingsPayload = lib.encodeSettingsPayload;
@@ -68,11 +69,6 @@ const cache = {};
 // ── Phone-side settings (config page) ────────────────────────────────────
 
 var SETTINGS_KEY = "tpw_settings";
-
-// Fixed-destination mode serves the fixed destination's parks in place
-// of the FIRST dest-list answer of each session — see the appmessage
-// handler for why it must be once-only.
-var s_fixed_dest_served = false;
 
 function loadSettings() {
   var raw = null;
@@ -149,16 +145,13 @@ Pebble.addEventListener("webviewclosed", function (e) {
   if (IS_UBER && settings.destMode === "fixed" && settings.destId) {
     // Apply immediately: a running watch app gets the fixed
     // destination's parks pushed right away (same path as a watch-side
-    // DEST_SELECT), instead of waiting for its next dest-list request.
-    // This push counts as the session's one fixed serve.
+    // DEST_SELECT), instead of waiting for its next dest request.
     console.log("PKJS: applying fixed destination " + settings.destId);
-    s_fixed_dest_served = true;
-    handleDestSelect(settings.destId);
-  } else {
-    // Settings no longer fix a destination — re-arm so a later save
-    // back to fixed mode applies within the same session.
-    s_fixed_dest_served = false;
+    handleDestSelect(settings.destId, true);
   }
+  // Switching back to "choose on watch" needs no push: the watch's
+  // fixed flag clears on the next unmarked parks payload, i.e. the
+  // next destination pick or relaunch resume.
 });
 
 const DEST_CACHE_KEY = "tpw_dest_cache";
@@ -377,9 +370,11 @@ function buildAndSendDestList() {
   });
 }
 
-// Watch picked a destination — update DESTINATION_ID/ALL_PARK_IDS and
-// send the park list (with icon + color per park) back to the watch.
-function handleDestSelect(destId) {
+// Watch picked a destination (or the fixed-destination setting did) —
+// update DESTINATION_ID/ALL_PARK_IDS and send the park list back to the
+// watch. `isFixed` prepends the M|fixed marker so the watch switches to
+// per-destination-style navigation (no dest picker, BACK exits).
+function handleDestSelect(destId, isFixed) {
   fetchDestList().then(function (dests) {
     var dest = null;
     for (var i = 0; i < dests.length; i++) {
@@ -396,12 +391,7 @@ function handleDestSelect(destId) {
       ALL_PARK_IDS.push(dest.parks[p].id);
     }
 
-    var lines = [];
-    for (var j = 0; j < dest.parks.length; j++) {
-      var pk = dest.parks[j];
-      lines.push(pk.id + "|" + pk.name + "|" + pk.icon + "|" + pk.color);
-    }
-    var payload = lines.join("\n");
+    var payload = buildParkLines(dest.parks, !!isFixed).join("\n");
     console.log("PKJS: sending parks for " + dest.name + " (" + dest.parks.length + " parks)");
     sendChunked("DEST_PARKS_DATA", payload,
       function () {
@@ -463,28 +453,17 @@ Pebble.addEventListener("ready", function () {
 Pebble.addEventListener("appmessage", function (e) {
   // Multi-destination: watch requesting destination list
   if (msgVal(e.payload, "DEST_LIST_DATA") != null) {
-    // Fixed-destination mode answers the FIRST request of this session
-    // with that destination's parks directly (DEST_PARKS_DATA) — the
-    // watch then behaves like a per-destination build, and cancels its
-    // dest-list watchdog on DEST_PARKS_DATA arrival (see api.c).
-    //
-    // Once only, because the watch re-requests the list whenever its
-    // destination picker lacks data (show_picker / BACK-from-park):
-    // answering every request with parks would loop forever
-    // (request -> parks -> show_picker -> request), and a single-park
-    // fixed destination would re-load the park on every BACK, trapping
-    // the user. Later requests get the normal list, which keeps the
-    // destination picker browsable — and recovers the session if the
-    // fixed id no longer exists upstream (handleDestSelect sends
-    // nothing, the watch's watchdog re-requests, the list answers).
-    // s_fixed_dest_served resets with PKJS itself on every watch app
-    // launch, and when settings change (webviewclosed re-applies).
+    // Fixed-destination mode answers EVERY dest request with that
+    // destination's parks, marked M|fixed — the watch then hides its
+    // destination picker entirely and never re-requests the list, so
+    // there is no request loop to guard against. If the fixed id no
+    // longer exists upstream, handleDestSelect sends nothing and the
+    // watch's dest-list watchdog re-requests — landing here again, so
+    // recovery needs the setting to change (documented limitation).
     var cfg = loadSettings();
-    if (IS_UBER && cfg.destMode === "fixed" && cfg.destId
-        && !s_fixed_dest_served) {
-      s_fixed_dest_served = true;
+    if (IS_UBER && cfg.destMode === "fixed" && cfg.destId) {
       console.log("PKJS: fixed destination " + cfg.destId);
-      handleDestSelect(cfg.destId);
+      handleDestSelect(cfg.destId, true);
       return;
     }
     console.log("PKJS: request for destination list");
@@ -495,8 +474,17 @@ Pebble.addEventListener("appmessage", function (e) {
   // Multi-destination: watch selected a destination
   var destSel = msgVal(e.payload, "DEST_SELECT");
   if (destSel != null) {
+    // Fixed mode also overrides the watch's startup resume (which
+    // re-selects its persisted last destination): launching must always
+    // land in the fixed destination, whatever the watch last browsed.
+    var sel = loadSettings();
+    if (IS_UBER && sel.destMode === "fixed" && sel.destId) {
+      console.log("PKJS: destination select overridden by fixed " + sel.destId);
+      handleDestSelect(sel.destId, true);
+      return;
+    }
     console.log("PKJS: destination selected: " + destSel);
-    handleDestSelect(destSel);
+    handleDestSelect(destSel, false);
     return;
   }
 

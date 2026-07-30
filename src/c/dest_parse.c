@@ -107,4 +107,22 @@ void dest_parse(const char *data, uint16_t len)
 	        g_dest_count, g_dest_section_count);
 }
 
+bool dest_parks_fixed_marker(const char *data, uint16_t len,
+                             uint16_t *body_offset)
+{
+	*body_offset = 0;
+	static const char MARKER[] = "M|fixed";
+	const uint16_t mlen = sizeof(MARKER) - 1;
+	if (!data || len < mlen) return false;
+	if (memcmp(data, MARKER, mlen) != 0) return false;
+	/* Marker must be a whole line (or the whole payload). */
+	if (len == mlen) {
+		*body_offset = mlen;
+		return true;
+	}
+	if (data[mlen] != '\n') return false;
+	*body_offset = mlen + 1;
+	return true;
+}
+
 #endif /* MULTI_DESTINATION */

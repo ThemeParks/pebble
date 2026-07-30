@@ -53,4 +53,12 @@ extern bool g_dest_no_location;
 /* Parse a complete destination-list payload into the store above. */
 void dest_parse(const char *data, uint16_t len);
 
+/* DEST_PARKS payloads open with an "M|fixed" line when PKJS served them
+ * because of the phone-side fixed-destination setting (rather than a
+ * watch-side pick). Returns true when the marker is present and sets
+ * *body_offset past the marker line, so the parks parser starts at the
+ * first park row. No marker: false, offset 0. */
+bool dest_parks_fixed_marker(const char *data, uint16_t len,
+                             uint16_t *body_offset);
+
 #endif /* MULTI_DESTINATION */

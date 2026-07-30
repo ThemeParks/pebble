@@ -26,11 +26,18 @@
 #include "loading_view.h"
 #ifdef MULTI_DESTINATION
 #include "dest_picker.h"
+#include "dest_parse.h"
 #endif
 #include <pebble.h>
 #include <string.h>
 
 static int s_current_park = -1;
+#ifdef MULTI_DESTINATION
+/* True while the parks in g_parks came from the phone-side fixed
+ * destination setting (M|fixed payload marker) — navigation then
+ * matches a per-destination build: no destination picker, BACK exits. */
+static bool s_fixed_mode = false;
+#endif
 static AppTimer *s_refresh_timer = NULL;
 static AppTimer *s_fetch_watchdog = NULL;
 /* True while an auto-refresh fetch is in flight. A silent refresh must be
@@ -165,10 +172,16 @@ static void show_picker(void)
 	 * so BACK from the park picker returns to the destination list
 	 * instead of exiting the app. Without this, a user who resumed into
 	 * a multi-park destination could never reach the destination list
-	 * again (relaunch auto-resumes the same destination). */
-	dest_picker_show(on_dest_select);
-	if (!dest_picker_has_data()) {
-		api_request_dest_list();
+	 * again (relaunch auto-resumes the same destination).
+	 *
+	 * Fixed-destination mode skips all of that: the user chose their
+	 * destination on the phone, so the park picker is the root window
+	 * and BACK from it exits like a per-destination build. */
+	if (!s_fixed_mode) {
+		dest_picker_show(on_dest_select);
+		if (!dest_picker_has_data()) {
+			api_request_dest_list();
+		}
 	}
 #endif
 	park_picker_show(on_picker_select);
@@ -184,6 +197,14 @@ static void show_error_for_current_park(void)
 static void on_park_back(void)
 {
 #ifdef MULTI_DESTINATION
+	/* Fixed destination + single park: there is nothing to go "back"
+	 * to — no picker would offer a choice — so BACK exits the app,
+	 * exactly like the per-destination builds (and deinit publishes
+	 * the glance on the way out). */
+	if (s_fixed_mode && num_parks == 1) {
+		window_stack_pop_all(true);
+		return;
+	}
 	/* Single-park destination: the park picker would only contain the
 	 * one park we just came from, so jump straight to the destination
 	 * picker instead. Multi-park destinations fall through to the
@@ -245,9 +266,16 @@ static void show_settings(void)
 
 static void on_dest_parks_received(const char *data, uint16_t len)
 {
+	/* An "M|fixed" first line means PKJS served these parks because of
+	 * the phone-side fixed-destination setting — the watch then behaves
+	 * like a per-destination build: no destination picker anywhere,
+	 * BACK exits. A payload without the marker (watch-side pick, or
+	 * settings back on "choose on watch") restores normal navigation. */
+	uint16_t pos = 0;
+	s_fixed_mode = dest_parks_fixed_marker(data, len, &pos);
+
 	/* Parse "id|name|icon|color\n..." into g_parks[] */
 	num_parks = 0;
-	uint16_t pos = 0;
 	while (pos < len && num_parks < MAX_PARKS) {
 		uint16_t nl = pos;
 		while (nl < len && data[nl] != '\n') nl++;
