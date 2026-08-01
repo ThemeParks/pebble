@@ -1,11 +1,13 @@
 /*
  * storage.h — persistent storage (favourites, sort mode, last park).
  *
- * Backed by Pebble's persist_* API. Favourites stored per park as a
- * bitmask indexed by ride/show position in the latest park data.
- *
- * Caveat: the bitmask is keyed by park UUID + a hash of (id, position).
- * Simpler approach: store up to 8 favourite IDs per park as fixed-len strings.
+ * Backed by Pebble's persist_* API. Favourites are stored per PARK
+ * IDENTITY (up to 8 fixed-length ids per park per list kind): a small
+ * allocation index maps park UUID → persist entry, allocated on first
+ * toggle and LRU-evicted at MAX_FAV_PARKS parks. Identity keying means
+ * favourites survive the uber app's destination switches (g_parks slots
+ * are repopulated per destination; favourites deliberately do NOT key
+ * off g_parks at all). See the layout comment in storage.c.
  */
 #pragma once
 
@@ -20,14 +22,22 @@ typedef enum {
 
 #define MAX_FAVS_PER_LIST 8
 #define FAV_ID_LEN 12
+/* Parks with an allocated favourites entry. Full table → LRU eviction
+ * (that park's favourites drop — fine at 12: it hasn't been opened in
+ * ages, and re-favouriting is one long-press). */
+#define MAX_FAV_PARKS 12
+/* Entry field for the park UUID (36 chars) + slack; matches the 40-byte
+ * park-id buffers used across the app. */
+#define FAV_PARK_ID_LEN 40
 
 void storage_init(void);
 
 /* Call when g_parks is repopulated (uber destination switch): drops the
- * favourites/hours RAM caches and deletes the persisted per-slot hours,
- * which would otherwise surface the PREVIOUS destination's hours under
- * the new destination's park names (slots are positional). Favourites
- * persist is kept — it's user data, re-read lazily per slot. */
+ * hours RAM cache and deletes the persisted per-slot hours, which would
+ * otherwise surface the PREVIOUS destination's hours under the new
+ * destination's park names (hours slots are positional; hours are cheap
+ * to refetch). Favourites are identity-keyed and need no invalidation —
+ * they survive the switch by design. */
 void storage_on_parks_changed(void);
 
 sort_mode_t storage_get_sort_mode(void);
@@ -61,6 +71,9 @@ typedef enum {
 	FAV_SHOWS = 1,
 } fav_list_kind_t;
 
+/* park_id is any UUID string (< FAV_PARK_ID_LEN); it does NOT have to
+ * be in g_parks — that's what makes favourites destination-proof.
+ * Reads never allocate an index entry; toggle allocates on demand. */
 bool storage_is_favourite(const char *park_id, fav_list_kind_t kind, const char *id);
 void storage_toggle_favourite(const char *park_id, fav_list_kind_t kind, const char *id);
 int storage_get_favourites(const char *park_id, fav_list_kind_t kind,

@@ -26,11 +26,13 @@ per-user pins).
   `show-<showId>-<startTime>`) so re-fetches update rather than duplicate.
 - Rate limits: the public timeline API allows a small number of pins per
   app per user — cap at hours + the next N (≈3) favourited showtimes.
-- Watch → phone: PKJS needs to know which shows are favourited. Today
-  favourites live only in watch persist. Add a small message
-  (`FAV_SHOWS_SYNC`: comma-joined short ids) sent whenever show favourites
-  change; PKJS caches it in localStorage. This sync is also a prerequisite
-  for the geofenced ride alerts design (docs/future/ride-alerts.md).
+- Watch → phone: **DONE** (`feat/fav-rekey`) — every favourite toggle
+  sends a `FAVS_SYNC` message carrying the park's FULL current
+  favourites state ("parkUuid|a:id,id|h:id,id", self-healing against
+  drops/reordering); PKJS persists it to localStorage `tpw_favs` as
+  `{parkUuid: {a:[...], h:[...], ts}}`. Pins (and the geofenced ride
+  alerts design, docs/future/ride-alerts.md) can read favourited show
+  ids straight from there.
 
 ## Server-pushed topic pins (the only live-background channel)
 

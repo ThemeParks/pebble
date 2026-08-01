@@ -18,9 +18,10 @@
 static void reset(void)
 {
 	persist_stub_reset();
-	/* storage.c caches favourites in RAM — drop it or favourites toggled
-	 * by a previous test bleed into this one. */
-	storage_on_parks_changed();
+	/* storage.c caches favourites (and their identity index) in RAM —
+	 * re-arm via storage_init (the simulated-relaunch hook) or
+	 * favourites toggled by a previous test bleed into this one. */
+	storage_init();
 	parkdata_clear();
 }
 

@@ -484,6 +484,66 @@ function buildGlanceLine(entries, nowMs) {
   return out.replace(/[;=|]/g, "");
 }
 
+// ── Favourites sync (watch → phone) ──────────────────────────────────────
+//
+// The watch pushes its favourites after every toggle as one FAVS_SYNC
+// message (favs_sync_encode in src/c/favs_sync.c — keep in sync):
+//   "<parkUuid>|a:<id,id,...>|h:<id,id,...>"
+// a = attractions, h = shows; always the FULL current state for that
+// park, never a delta, so a dropped/reordered message self-heals on the
+// next toggle. index.js persists the parsed result into localStorage
+// "tpw_favs" as {parkUuid: {a:[...], h:[...], ts}} — the store timeline
+// pins and ride alerts will read.
+
+// Tolerant parse of a FAVS_SYNC payload. Returns
+//   { parkId, attractions: [...], shows: [...] }
+// or null when there's no usable park id. Unknown segments and empty
+// ids are skipped — garbage degrades to fewer favourites, never to a
+// throw (this runs on whatever bytes arrive off the air).
+function parseFavsSync(str) {
+  if (typeof str !== "string" || !str) return null;
+  var parts = str.split("|");
+  var parkId = parts[0];
+  if (!parkId) return null;
+  var out = { parkId: parkId, attractions: [], shows: [] };
+  for (var i = 1; i < parts.length; i++) {
+    var seg = parts[i];
+    var colon = seg.indexOf(":");
+    if (colon < 1) continue;
+    var kind = seg.slice(0, colon);
+    var target = null;
+    if (kind === "a") target = out.attractions;
+    else if (kind === "h") target = out.shows;
+    if (!target) continue;   // unknown kind — forward compatibility
+    var ids = seg.slice(colon + 1).split(",");
+    for (var j = 0; j < ids.length; j++) {
+      if (ids[j]) target.push(ids[j]);
+    }
+  }
+  return out;
+}
+
+// Merge one parsed FAVS_SYNC into the favourites store. Pure: returns a
+// NEW store object; `prev` (the current store, or null/garbage) is not
+// mutated. The synced park's entry is REPLACED wholesale (the payload
+// is the full truth for that park); other parks are carried over.
+function buildFavsStore(prev, parsed, nowMs) {
+  var out = {};
+  if (prev && typeof prev === "object") {
+    for (var k in prev) {
+      if (Object.prototype.hasOwnProperty.call(prev, k)) out[k] = prev[k];
+    }
+  }
+  if (parsed && parsed.parkId) {
+    out[parsed.parkId] = {
+      a: (parsed.attractions || []).slice(),
+      h: (parsed.shows || []).slice(),
+      ts: nowMs == null ? Date.now() : nowMs,
+    };
+  }
+  return out;
+}
+
 // Minimal HTML escaping for text nodes and double-quoted attributes.
 function escapeHtml(s) {
   return String(s)
@@ -739,4 +799,6 @@ module.exports = {
   assignParkCodes: assignParkCodes,
   shortestOperatingWait: shortestOperatingWait,
   buildGlanceLine: buildGlanceLine,
+  parseFavsSync: parseFavsSync,
+  buildFavsStore: buildFavsStore,
 };

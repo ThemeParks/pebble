@@ -31,6 +31,8 @@ var encodeSettingsPayload = lib.encodeSettingsPayload;
 var buildConfigPage = lib.buildConfigPage;
 var shortestOperatingWait = lib.shortestOperatingWait;
 var buildGlanceLine = lib.buildGlanceLine;
+var parseFavsSync = lib.parseFavsSync;
+var buildFavsStore = lib.buildFavsStore;
 
 function msgVal(payload, name) {
   if (payload[name] !== undefined) return payload[name];
@@ -623,7 +625,42 @@ Pebble.addEventListener("ready", function () {
   );
 });
 
+// ── Favourites sync (watch → phone) ──────────────────────────────────────
+//
+// The watch mirrors its favourites here after every toggle (FAVS_SYNC,
+// full state per park — see lib.parseFavsSync). Persisted per park in
+// localStorage FAVS_KEY as {parkUuid: {a:[...], h:[...], ts}} so
+// timeline pins / ride alerts can read them without waking the watch.
+
+var FAVS_KEY = "tpw_favs";
+
+function handleFavsSync(raw) {
+  var parsed = parseFavsSync(String(raw));
+  if (!parsed) {
+    console.log("PKJS: favs sync unparseable");
+    return;
+  }
+  var prev = null;
+  try { prev = JSON.parse(localStorage.getItem(FAVS_KEY)); } catch (err) {}
+  var store = buildFavsStore(prev, parsed, Date.now());
+  try {
+    localStorage.setItem(FAVS_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.log("PKJS: favs store save failed - " + err.message);
+  }
+  console.log("PKJS: favs synced " + parsed.parkId +
+              " a" + parsed.attractions.length +
+              " h" + parsed.shows.length);
+}
+
 Pebble.addEventListener("appmessage", function (e) {
+  // Watch pushed its favourites after a toggle.
+  var favsRaw = msgVal(e.payload, "FAVS_SYNC");
+  if (favsRaw != null) {
+    handleFavsSync(favsRaw);
+    return;
+  }
+
   // Multi-destination: watch requesting destination list
   if (msgVal(e.payload, "DEST_LIST_DATA") != null) {
     // Fixed-destination mode answers EVERY dest request with that

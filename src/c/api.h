@@ -31,6 +31,13 @@ void api_fetch_park_force(const char *park_id);
  * has been individually opened. */
 void api_fetch_all_hours(void);
 
+/* Push the given park's FULL favourites state (both list kinds) to
+ * PKJS as one FAVS_SYNC message — call right after a favourite toggle
+ * (settings_view.c / park_view.c do). Busy outbox or a not-yet-ready
+ * PKJS retries shortly; a lost sync self-heals on the next toggle
+ * because the payload is always the complete current state. */
+void api_send_favs_sync(const char *park_id);
+
 /* Returns true once the PKJS ready signal has been received. */
 bool api_is_connected(void);
 

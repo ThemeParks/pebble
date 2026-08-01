@@ -941,6 +941,79 @@ test("buildConfigPage My Parks escapes park names", function () {
             "group header escaped");
 });
 
+// ── parseFavsSync ────────────────────────────────────────────────────────
+//
+// Round-trips against the exact strings the C encoder emits (asserted
+// byte-for-byte in tests/unit/test_favs_sync.c) — the two suites pin
+// the wire format from both ends.
+
+var FAVS_UUID = "aaaaaaaa-1111-4abc-8def-000000000001";
+
+test("parseFavsSync round-trips the C encoder's typical payload", function () {
+  var p = lib.parseFavsSync(FAVS_UUID + "|a:ride0,ride1|h:show0");
+  assert.strictEqual(p.parkId, FAVS_UUID);
+  assert.deepStrictEqual(p.attractions, ["ride0", "ride1"]);
+  assert.deepStrictEqual(p.shows, ["show0"]);
+});
+
+test("parseFavsSync round-trips the C encoder's empty payload", function () {
+  var p = lib.parseFavsSync(FAVS_UUID + "|a:|h:");
+  assert.strictEqual(p.parkId, FAVS_UUID);
+  assert.deepStrictEqual(p.attractions, []);
+  assert.deepStrictEqual(p.shows, []);
+});
+
+test("parseFavsSync tolerates garbage", function () {
+  // No usable park id → null, never a throw.
+  assert.strictEqual(lib.parseFavsSync(""), null);
+  assert.strictEqual(lib.parseFavsSync(null), null);
+  assert.strictEqual(lib.parseFavsSync(undefined), null);
+  assert.strictEqual(lib.parseFavsSync(42), null);
+  assert.strictEqual(lib.parseFavsSync("|a:x|h:y"), null);
+  // Park id alone parses to empty lists.
+  var bare = lib.parseFavsSync("some-park");
+  assert.strictEqual(bare.parkId, "some-park");
+  assert.deepStrictEqual(bare.attractions, []);
+  assert.deepStrictEqual(bare.shows, []);
+  // Unknown kinds and malformed segments are skipped, known ones kept.
+  var mixed = lib.parseFavsSync("p1|z:junk|a:r1|:bad|nocolon|h:s1,,s2");
+  assert.deepStrictEqual(mixed.attractions, ["r1"]);
+  // Empty ids from ",," are dropped.
+  assert.deepStrictEqual(mixed.shows, ["s1", "s2"]);
+});
+
+// ── buildFavsStore ───────────────────────────────────────────────────────
+
+test("buildFavsStore creates and stamps a new park entry", function () {
+  var store = lib.buildFavsStore(null,
+    { parkId: "p1", attractions: ["a1"], shows: ["s1"] }, 1234);
+  assert.deepStrictEqual(store, { p1: { a: ["a1"], h: ["s1"], ts: 1234 } });
+});
+
+test("buildFavsStore replaces the synced park, keeps others", function () {
+  var prev = {
+    p1: { a: ["old"], h: [], ts: 1 },
+    p2: { a: ["keep"], h: ["keep2"], ts: 2 },
+  };
+  var store = lib.buildFavsStore(prev,
+    { parkId: "p1", attractions: [], shows: ["s9"] }, 99);
+  // p1 replaced wholesale (full-state sync), p2 carried over untouched.
+  assert.deepStrictEqual(store.p1, { a: [], h: ["s9"], ts: 99 });
+  assert.deepStrictEqual(store.p2, prev.p2);
+  // Pure: prev not mutated.
+  assert.deepStrictEqual(prev.p1, { a: ["old"], h: [], ts: 1 });
+});
+
+test("buildFavsStore tolerates garbage prev and parsed", function () {
+  assert.deepStrictEqual(lib.buildFavsStore("junk", null, 5), {});
+  assert.deepStrictEqual(lib.buildFavsStore(undefined, null, 5), {});
+  var kept = lib.buildFavsStore({ p1: { a: [], h: [], ts: 1 } }, null, 5);
+  assert.deepStrictEqual(kept, { p1: { a: [], h: [], ts: 1 } });
+  // Missing lists on parsed degrade to empty arrays.
+  var s = lib.buildFavsStore(null, { parkId: "p3" }, 7);
+  assert.deepStrictEqual(s.p3, { a: [], h: [], ts: 7 });
+});
+
 // ── summary ──────────────────────────────────────────────────────────────
 
 console.log(passed + " passed, " + failed + " failed");

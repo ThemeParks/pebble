@@ -47,6 +47,7 @@ C_COMMON_SOURCES = [
     SRC_C_DIR / "format.c",
     SRC_C_DIR / "dest_parse.c",
     SRC_C_DIR / "settings_parse.c",
+    SRC_C_DIR / "favs_sync.c",
     SUPPORT_DIR / "persist_stub.c",
     SUPPORT_DIR / "test_config.c",
 ]

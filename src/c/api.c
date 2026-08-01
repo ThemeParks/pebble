@@ -12,11 +12,15 @@
 #include "parkdata.h"
 #include "settings_parse.h"
 #include "storage.h"
+#include "favs_sync.h"
 #include "message_keys.auto.h"
 #include <string.h>
 #include <stdlib.h>
 
 #define INBOX_SIZE 8192
+/* Outbox: sized for the largest watch→phone message, the FAVS_SYNC
+ * payload (≤233 bytes, see favs_sync.h) + ~8 bytes dict/tuple
+ * overhead. Everything else we send is tiny. */
 #define OUTBOX_SIZE 256
 
 /* Payloads bigger than the inbox (the full destination list is ~11KB)
@@ -51,6 +55,12 @@ static bool s_all_hours_queued = false;
 static AppTimer *s_ready_timer = NULL;
 static AppTimer *s_heartbeat_timer = NULL;
 static uint32_t s_heartbeat_interval = READY_TIMEOUT_MS;
+
+/* Retry timers for outbox-busy sends (defined-with-logic below; hoisted
+ * here so api_deinit can cancel them). */
+static AppTimer *s_hours_retry_timer = NULL;
+static char s_favs_pending_park[40] = {0};
+static AppTimer *s_favs_retry_timer = NULL;
 
 #ifdef MULTI_DESTINATION
 static api_dest_list_cb_t s_dest_list_cb = NULL;
@@ -377,6 +387,8 @@ void api_deinit(void)
 {
 	if (s_ready_timer) { app_timer_cancel(s_ready_timer); s_ready_timer = NULL; }
 	if (s_heartbeat_timer) { app_timer_cancel(s_heartbeat_timer); s_heartbeat_timer = NULL; }
+	if (s_favs_retry_timer) { app_timer_cancel(s_favs_retry_timer); s_favs_retry_timer = NULL; }
+	if (s_hours_retry_timer) { app_timer_cancel(s_hours_retry_timer); s_hours_retry_timer = NULL; }
 #ifdef MULTI_DESTINATION
 	if (s_dest_list_retry_timer) { app_timer_cancel(s_dest_list_retry_timer); s_dest_list_retry_timer = NULL; }
 #endif
@@ -417,12 +429,79 @@ static void send_request(void)
 	}
 }
 
-static AppTimer *s_hours_retry_timer = NULL;
-
 static void hours_retry_tick(void *ctx)
 {
 	s_hours_retry_timer = NULL;
 	api_fetch_all_hours();
+}
+
+/* --- favourites sync (watch → phone) ---------------------------------
+ * One small message per favourite toggle carrying the FULL current
+ * lists for that park (never a delta), so a dropped/reordered send
+ * self-heals on the next toggle. Busy outbox → remember the park and
+ * retry shortly; a newer toggle simply overwrites the pending park
+ * (the payload is rebuilt from storage at send time, so it's always
+ * the latest state). */
+static void favs_sync_retry_tick(void *ctx)
+{
+	s_favs_retry_timer = NULL;
+	if (s_favs_pending_park[0]) {
+		char tmp[40];
+		strncpy(tmp, s_favs_pending_park, sizeof(tmp) - 1);
+		tmp[sizeof(tmp) - 1] = '\0';
+		s_favs_pending_park[0] = '\0';
+		api_send_favs_sync(tmp);
+	}
+}
+
+static void favs_sync_defer(const char *park_id)
+{
+	strncpy(s_favs_pending_park, park_id, sizeof(s_favs_pending_park) - 1);
+	s_favs_pending_park[sizeof(s_favs_pending_park) - 1] = '\0';
+	if (!s_favs_retry_timer) {
+		s_favs_retry_timer = app_timer_register(2000, favs_sync_retry_tick,
+		                                        NULL);
+	}
+}
+
+void api_send_favs_sync(const char *park_id)
+{
+	if (!park_id || !park_id[0]) return;
+	if (!s_pkjs_ready) {
+		/* PKJS not up — park in the retry slot; the timer path re-checks
+		 * readiness every 2s until the handshake lands. */
+		favs_sync_defer(park_id);
+		return;
+	}
+
+	char attrs[MAX_FAVS_PER_LIST][FAV_ID_LEN];
+	char shows[MAX_FAVS_PER_LIST][FAV_ID_LEN];
+	storage_get_favourites(park_id, FAV_ATTRACTIONS, attrs);
+	storage_get_favourites(park_id, FAV_SHOWS, shows);
+	char payload[240];
+	int len = favs_sync_encode(park_id, attrs, shows,
+	                           payload, sizeof(payload));
+	if (len < 0) {
+		APP_LOG(APP_LOG_LEVEL_WARNING, "favs sync encode failed");
+		return;
+	}
+
+	DictionaryIterator *iter;
+	AppMessageResult r = app_message_outbox_begin(&iter);
+	if (r != APP_MSG_OK) {
+		/* Almost always APP_MSG_BUSY (a park-data request in flight) —
+		 * same treatment as api_fetch_all_hours. */
+		APP_LOG(APP_LOG_LEVEL_INFO, "favs sync outbox busy (%d) — retrying", r);
+		favs_sync_defer(park_id);
+		return;
+	}
+	dict_write_cstring(iter, MESSAGE_KEY_FAVS_SYNC, payload);
+	r = app_message_outbox_send();
+	if (r != APP_MSG_OK) {
+		APP_LOG(APP_LOG_LEVEL_WARNING, "favs sync outbox_send: %d", r);
+		return;
+	}
+	APP_LOG(APP_LOG_LEVEL_INFO, "favs sync sent (%d bytes)", len);
 }
 
 void api_fetch_all_hours(void)

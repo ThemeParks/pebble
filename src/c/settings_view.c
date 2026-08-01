@@ -8,6 +8,7 @@
 #include "settings_view.h"
 #include "parkdata.h"
 #include "storage.h"
+#include "api.h"
 #include "config.h"
 #include "colours.h"
 #include "ui_common.h"
@@ -252,6 +253,9 @@ static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx)
 		APP_LOG(APP_LOG_LEVEL_INFO, "SV toggle %s %s",
 			a->id,
 			storage_is_favourite(s_park_id, FAV_ATTRACTIONS, a->id) ? "ON" : "OFF");
+		/* Mirror the new state to the phone (timeline pins / ride
+		 * alerts read it from localStorage there). */
+		api_send_favs_sync(s_park_id);
 		menu_layer_reload_data(s_menu);
 		break;
 	}
@@ -262,6 +266,7 @@ static void menu_select(MenuLayer *l, MenuIndex *idx, void *ctx)
 		APP_LOG(APP_LOG_LEVEL_INFO, "SV toggle %s %s",
 			sh->id,
 			storage_is_favourite(s_park_id, FAV_SHOWS, sh->id) ? "ON" : "OFF");
+		api_send_favs_sync(s_park_id);
 		menu_layer_reload_data(s_menu);
 		break;
 	}

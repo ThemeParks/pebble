@@ -14,6 +14,7 @@
 #include "parkdata.h"
 #include "sort.h"
 #include "storage.h"
+#include "api.h"
 #include "config.h"
 #include "colours.h"
 #include "format.h"
@@ -594,6 +595,9 @@ static void long_select_handler(ClickRecognizerRef ref, void *ctx)
 	/* Same marker format as settings_view.c — integration tests grep it. */
 	APP_LOG(APP_LOG_LEVEL_INFO, "SV toggle %s %s", id,
 	        storage_is_favourite(s_park_id, kind, id) ? "ON" : "OFF");
+	/* Mirror the new state to the phone (timeline pins / ride alerts
+	 * read it from localStorage there). */
+	api_send_favs_sync(s_park_id);
 
 	resort();
 	int row = sort_find_id(s_sorted, s_sorted_count, kind, id);

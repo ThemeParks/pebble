@@ -35,7 +35,8 @@
       "CHUNK_INDEX",
       "CHUNK_MORE",
       "REQUEST_FORCE",
-      "SETTINGS_DATA"
+      "SETTINGS_DATA",
+      "FAVS_SYNC"
     ],
     "resources": {
       "media": []
