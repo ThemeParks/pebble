@@ -342,9 +342,10 @@ def main() -> int:
         #    reaches C code on incremental builds. `pebble clean` forces a
         #    reconfigure. (Slower, but a wrong binary is far more expensive
         #    than a rebuild.)
-        for stale in (dest_dir / "build").glob("*.pbw"):
-            stale.unlink()
-        pebble(["pebble", "clean"], dest_dir)   # rc ignored: no-op pre-first-build
+        # `pebble clean` proved unreliable (silent failures left stale
+        # message_keys.auto.h twice across releases) — remove the build
+        # tree directly. Deterministic, and waf reconfigures from scratch.
+        shutil.rmtree(dest_dir / "build", ignore_errors=True)
         if pebble(["pebble", "build"], dest_dir) != 0:
             return 1
         # Copy the built .pbw into builds/<slug>.pbw so every
