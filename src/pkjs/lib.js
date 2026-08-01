@@ -578,7 +578,14 @@ function buildConfigPage(settings, dests, isUber, parks) {
   h.push(".card h2{font-size:1em;margin:0 0 8px;}");
   h.push(".card h3{font-size:0.85em;margin:10px 0 2px;color:#555;}");
   h.push("label{display:block;margin:6px 0;}");
-  h.push("select{width:100%;margin-top:6px;}");
+  h.push(".filter{width:100%;box-sizing:border-box;padding:8px;margin:6px 0;"
+         + "border:1px solid #ccc;border-radius:6px;font-size:1em;}");
+  h.push(".scrolllist{max-height:40vh;overflow-y:auto;border:1px solid #eee;"
+         + "border-radius:6px;padding:4px 8px;}");
+  h.push(".scrolllist .row{margin:4px 0;}");
+  h.push(".sel{font-size:0.9em;margin:6px 0;color:#333;}");
+  h.push(".chip{display:inline-block;background:#e0e0e0;border-radius:12px;"
+         + "padding:2px 10px;margin:2px 4px 2px 0;}");
   h.push(".hint{font-size:0.85em;color:#666;margin:6px 0 0;}");
   h.push(".buttons{display:flex;gap:8px;}");
   h.push("button{flex:1;padding:10px;font-size:1em;border:0;border-radius:6px;}");
@@ -603,22 +610,33 @@ function buildConfigPage(settings, dests, isUber, parks) {
            + (fixed ? " checked" : "") + (haveDests ? "" : " disabled")
            + "> Fixed destination</label>");
     if (haveDests) {
-      // Group by region (same buckets as the watch's destination picker);
-      // location-less destinations go under "Other" rather than being
-      // dropped — a user must be able to fix on any destination the watch
-      // could reach. Alphabetical groups; "Other" happens to sort last.
+      // ~155 destinations and growing: a dropdown was unusable (device
+      // feedback). Filterable radio list instead — grouped by region
+      // (same buckets as the watch's destination picker), bounded
+      // height with internal scroll, a live text filter, and the
+      // current pick echoed above the list so it never scrolls out of
+      // sight. Location-less destinations go under "Other" rather than
+      // being dropped. Alphabetical groups; "Other" sorts last.
       var groups = {};
+      var selName = "";
       for (var i = 0; i < dests.length; i++) {
         var d = dests[i];
+        if (settings.destId === d.id) selName = d.name;
         var region = (d.lat == null || d.lon == null)
           ? "Other" : classifyRegion(d.lat, d.lon);
         if (!groups[region]) groups[region] = [];
         groups[region].push(d);
       }
       var names = Object.keys(groups).sort();
-      h.push('<select id="destid"' + (fixed ? "" : " disabled") + ">");
+      h.push('<input type="text" class="filter" id="destfilter" '
+             + 'placeholder="Filter destinations..."'
+             + (fixed ? "" : " disabled") + ">");
+      h.push('<div class="sel">Selected: <span id="destselname">'
+             + (selName ? escapeHtml(selName) : "none") + "</span></div>");
+      h.push('<div class="scrolllist" id="destlist">');
       for (var g = 0; g < names.length; g++) {
-        h.push('<optgroup label="' + escapeHtml(names[g]) + '">');
+        h.push('<div class="grp">');
+        h.push("<h3>" + escapeHtml(names[g]) + "</h3>");
         var gd = groups[names[g]];
         gd.sort(function (a, b) {
           if (a.name < b.name) return -1;
@@ -626,13 +644,17 @@ function buildConfigPage(settings, dests, isUber, parks) {
           return 0;
         });
         for (var j = 0; j < gd.length; j++) {
-          h.push('<option value="' + escapeHtml(gd[j].id) + '"'
-                 + (settings.destId === gd[j].id ? " selected" : "") + ">"
-                 + escapeHtml(gd[j].name) + "</option>");
+          h.push('<label class="row" data-s="'
+                 + escapeHtml((gd[j].name + " " + names[g]).toLowerCase()) + '">'
+                 + '<input type="radio" name="destpick" value="'
+                 + escapeHtml(gd[j].id) + '" data-n="' + escapeHtml(gd[j].name) + '"'
+                 + (settings.destId === gd[j].id ? " checked" : "")
+                 + (fixed ? "" : " disabled") + "> "
+                 + escapeHtml(gd[j].name) + "</label>");
         }
-        h.push("</optgroup>");
+        h.push("</div>");
       }
-      h.push("</select>");
+      h.push("</div>");
     } else {
       h.push('<p class="hint">Destination list unavailable — check the phone\'s '
              + "internet connection and reopen this page.</p>");
@@ -654,14 +676,23 @@ function buildConfigPage(settings, dests, isUber, parks) {
     }
     return "";
   }
-  function parkBox(pk) {
-    h.push('<label><input type="checkbox" name="mypark" value="'
-           + escapeHtml(pk.id) + '"' + checkedAttr(pk.id) + "> "
-           + escapeHtml(pk.name) + "</label>");
+  function parkBox(pk, groupName) {
+    h.push('<label class="row" data-s="'
+           + escapeHtml((pk.name + " " + (groupName || "")).toLowerCase()) + '">'
+           + '<input type="checkbox" name="mypark" value="'
+           + escapeHtml(pk.id) + '" data-n="' + escapeHtml(pk.name) + '"'
+           + checkedAttr(pk.id) + "> " + escapeHtml(pk.name) + "</label>");
   }
   h.push('<div class="card"><h2>My Parks</h2>');
   h.push('<p class="hint">Pick up to 4 parks to show live waits for in the launcher.</p>');
   var anyParks = false;
+  // Nearly 200 parks in the uber build: filter + bounded scroll, with
+  // the current picks echoed as tap-to-remove chips that never scroll
+  // or filter out of sight.
+  h.push('<input type="text" class="filter" id="mpfilter" placeholder="Filter parks...">');
+  h.push('<div class="sel">Selected (<span id="mpcount">0</span>/' + MYPARKS_MAX
+         + '): <span id="mpsel">none</span></div>');
+  h.push('<div class="scrolllist" id="mplist">');
   if (isUber) {
     if (dests && dests.length > 0) {
       var sortedDests = dests.slice().sort(function (a, b) {
@@ -673,14 +704,19 @@ function buildConfigPage(settings, dests, isUber, parks) {
         var dp = sortedDests[sd].parks || [];
         if (dp.length === 0) continue;
         anyParks = true;
+        h.push('<div class="grp">');
         h.push("<h3>" + escapeHtml(sortedDests[sd].name) + "</h3>");
-        for (var pp = 0; pp < dp.length; pp++) parkBox(dp[pp]);
+        for (var pp = 0; pp < dp.length; pp++) parkBox(dp[pp], sortedDests[sd].name);
+        h.push("</div>");
       }
     }
   } else if (parks && parks.length > 0) {
     anyParks = true;
-    for (var op = 0; op < parks.length; op++) parkBox(parks[op]);
+    h.push('<div class="grp">');
+    for (var op = 0; op < parks.length; op++) parkBox(parks[op], "");
+    h.push("</div>");
   }
+  h.push("</div>");
   if (!anyParks) {
     // Same degradation as the dropdown: the page still opens, this
     // section just can't offer anything. (Wording avoids the exact
@@ -700,28 +736,63 @@ function buildConfigPage(settings, dests, isUber, parks) {
   h.push("<script>");
   h.push("function radioVal(name){var r=document.getElementsByName(name);"
          + "for(var i=0;i<r.length;i++){if(r[i].checked)return r[i].value;}return null;}");
-  h.push("function setDestEnabled(){var s=document.getElementById('destid');"
-         + "if(s){s.disabled=radioVal('destmode')!=='fixed';}}");
+  // Live text filter over a grouped list: rows hide unless their data-s
+  // (lowercased name + group) contains the query; groups with no
+  // visible rows hide entirely.
+  h.push("function wireFilter(inputId,listId){var inp=document.getElementById(inputId);"
+         + "var list=document.getElementById(listId);if(!inp||!list)return;"
+         + "inp.oninput=inp.onkeyup=function(){var q=inp.value.toLowerCase();"
+         + "var grps=list.getElementsByClassName('grp');"
+         + "for(var g=0;g<grps.length;g++){var rows=grps[g].getElementsByClassName('row');"
+         + "var vis=0;for(var r=0;r<rows.length;r++){"
+         + "var m=q===''||rows[r].getAttribute('data-s').indexOf(q)>=0;"
+         + "rows[r].style.display=m?'':'none';if(m)vis++;}"
+         + "grps[g].style.display=vis?'':'none';}};}");
+  h.push("wireFilter('destfilter','destlist');wireFilter('mpfilter','mplist');");
+  // Destination: mode radios enable/disable the picker; the picked name
+  // echoes above the list so it survives filtering and scrolling.
+  h.push("function setDestEnabled(){var fixed=radioVal('destmode')==='fixed';"
+         + "var f=document.getElementById('destfilter');if(f)f.disabled=!fixed;"
+         + "var r=document.getElementsByName('destpick');"
+         + "for(var i=0;i<r.length;i++)r[i].disabled=!fixed;}");
+  h.push("function refreshDestSel(){var n=document.getElementById('destselname');"
+         + "if(!n)return;var r=document.getElementsByName('destpick');"
+         + "for(var i=0;i<r.length;i++){if(r[i].checked){"
+         + "n.innerHTML=r[i].getAttribute('data-n');return;}}n.innerHTML='none';}");
   h.push("var radios=document.getElementsByName('destmode');"
-         + "for(var i=0;i<radios.length;i++){radios[i].onchange=setDestEnabled;}");
-  // My Parks cap: once MYPARKS_MAX boxes are checked, disable the
-  // unchecked ones; un-checking re-enables. Runs on load too so a
-  // prefilled-at-cap page starts locked.
+         + "for(var i=0;i<radios.length;i++){radios[i].onchange=setDestEnabled;}"
+         + "var dpr=document.getElementsByName('destpick');"
+         + "for(var di=0;di<dpr.length;di++){dpr[di].onchange=refreshDestSel;}");
+  // My Parks cap + chips: once MYPARKS_MAX boxes are checked, disable
+  // the unchecked ones; picks echo as tap-to-remove chips that never
+  // scroll or filter out of sight. Runs on load so a prefilled-at-cap
+  // page starts locked and the chips show immediately.
   h.push("function updateMyParksCap(){var b=document.getElementsByName('mypark');"
-         + "var n=0;var i;for(i=0;i<b.length;i++){if(b[i].checked)n++;}"
-         + "for(i=0;i<b.length;i++){if(!b[i].checked)b[i].disabled=(n>=" + MYPARKS_MAX + ");}}");
+         + "var n=0;var i;var chips='';"
+         + "for(i=0;i<b.length;i++){if(b[i].checked){n++;"
+         + "chips+='<span class=\"chip\" data-id=\"'+b[i].value+'\">'"
+         + "+b[i].getAttribute('data-n')+' &times;</span>';}}"
+         + "for(i=0;i<b.length;i++){if(!b[i].checked)b[i].disabled=(n>=" + MYPARKS_MAX + ");}"
+         + "document.getElementById('mpcount').innerHTML=n;"
+         + "document.getElementById('mpsel').innerHTML=chips||'none';}");
+  h.push("document.getElementById('mpsel').onclick=function(ev){"
+         + "ev=ev||window.event;var t=ev.target||ev.srcElement;"
+         + "if(!t||t.className!=='chip')return;var id=t.getAttribute('data-id');"
+         + "var b=document.getElementsByName('mypark');"
+         + "for(var i=0;i<b.length;i++){if(b[i].value===id)b[i].checked=false;}"
+         + "updateMyParksCap();};");
   h.push("var mpb=document.getElementsByName('mypark');"
          + "for(var mi=0;mi<mpb.length;mi++){mpb[mi].onchange=updateMyParksCap;}"
-         + "updateMyParksCap();");
+         + "updateMyParksCap();refreshDestSel();");
   h.push("document.getElementById('cancel').onclick=function(){"
          + "document.location='pebblejs://close';};");
   h.push("document.getElementById('save').onclick=function(){"
          + "var s={v:1};"
          + "s.glance=document.getElementById('glance').checked;"
          + "var mode=radioVal('destmode');"
-         + "var sel=document.getElementById('destid');"
-         + "s.destMode=(mode==='fixed'&&sel&&sel.value)?'fixed':'watch';"
-         + "s.destId=(s.destMode==='fixed')?sel.value:null;"
+         + "var pick=radioVal('destpick');"
+         + "s.destMode=(mode==='fixed'&&pick)?'fixed':'watch';"
+         + "s.destId=(s.destMode==='fixed')?pick:null;"
          + "s.myParks=[];"
          + "var mp=document.getElementsByName('mypark');"
          + "for(var pi=0;pi<mp.length;pi++){"

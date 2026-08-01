@@ -789,49 +789,60 @@ test("buildConfigPage non-uber: toggle present, no destination section", functio
   assert.ok(html.indexOf('name="destmode"') === -1, "no destmode radios");
 });
 
-test("buildConfigPage uber: destination section with grouped select", function () {
+test("buildConfigPage uber: filterable grouped destination list", function () {
   var html = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
   assert.ok(html.indexOf('name="destmode"') >= 0, "destmode radios");
   assert.ok(html.indexOf('value="watch"') >= 0);
   assert.ok(html.indexOf('value="fixed"') >= 0);
-  // Region optgroups from classifyRegion; location-less dest lands in
-  // "Other" instead of being dropped. Groups alphabetical.
-  var eu = html.indexOf('<optgroup label="Europe">');
-  var na = html.indexOf('<optgroup label="North America">');
-  var other = html.indexOf('<optgroup label="Other">');
-  assert.ok(eu >= 0 && na >= 0 && other >= 0, "expected optgroups");
+  // ~155 destinations: a filter input + bounded scroll list of radios,
+  // grouped by region; location-less dest lands in "Other" instead of
+  // being dropped. Groups alphabetical.
+  assert.ok(html.indexOf('id="destfilter"') >= 0, "filter input");
+  assert.ok(html.indexOf('id="destlist"') >= 0, "scroll list");
+  assert.ok(html.indexOf("wireFilter('destfilter','destlist')") >= 0, "filter wired");
+  var eu = html.indexOf("<h3>Europe</h3>");
+  var na = html.indexOf("<h3>North America</h3>");
+  var other = html.indexOf("<h3>Other</h3>");
+  assert.ok(eu >= 0 && na >= 0 && other >= 0, "expected group headers");
   assert.ok(eu < na && na < other, "groups sorted alphabetically");
   assert.ok(html.indexOf('value="dest-nol"') > other, "location-less in Other");
   // Names sorted within a group: Adventureland before Walt Disney World.
   var adv = html.indexOf('value="dest-adv"');
   var wdw = html.indexOf('value="dest-wdw"');
   assert.ok(na < adv && adv < wdw, "names sorted within group");
+  // Rows carry the lowercased search key (name + region).
+  assert.ok(html.indexOf('data-s="walt disney world north america"') >= 0,
+            "search key on row");
 });
 
 test("buildConfigPage prefills from current settings", function () {
   // glance off + fixed WDW: checkbox unchecked, fixed radio checked,
-  // WDW option selected, select enabled.
+  // WDW radio checked and echoed as the selection, picker enabled.
   var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw" };
   var html = lib.buildConfigPage(s, CONFIG_DESTS, true);
   assert.ok(html.indexOf('id="glance" checked') === -1, "glance unchecked");
   assert.ok(/value="fixed" checked/.test(html), "fixed radio checked");
   assert.ok(!/value="watch" checked/.test(html), "watch radio not checked");
-  assert.ok(html.indexOf('value="dest-wdw" selected') >= 0, "dest selected");
-  assert.ok(html.indexOf('id="destid" disabled') === -1, "select enabled");
+  assert.ok(/value="dest-wdw"[^>]*checked/.test(html), "dest radio checked");
+  assert.ok(html.indexOf('id="destselname">Walt Disney World<') >= 0,
+            "selection echoed above the list");
+  assert.ok(html.indexOf('id="destfilter" placeholder="Filter destinations..." disabled') === -1,
+            "filter enabled in fixed mode");
 
-  // Defaults: glance checked, watch mode checked, select disabled.
+  // Defaults: glance checked, watch mode checked, picker disabled.
   var html2 = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
   assert.ok(html2.indexOf('id="glance" checked') >= 0, "glance checked");
   assert.ok(/value="watch" checked/.test(html2), "watch radio checked");
-  assert.ok(html2.indexOf('id="destid" disabled') >= 0, "select starts disabled");
-  assert.ok(html2.indexOf(" selected") === -1, "no option preselected");
+  assert.ok(/id="destfilter"[^>]*disabled/.test(html2), "filter starts disabled");
+  assert.ok(/name="destpick"[^>]*disabled/.test(html2), "radios start disabled");
+  assert.ok(html2.indexOf('id="destselname">none<') >= 0, "no dest preselected");
 });
 
 test("buildConfigPage empty dest list disables fixed with hint", function () {
   var s = { v: 1, glance: true, destMode: "fixed", destId: "dest-wdw" };
   var html = lib.buildConfigPage(s, [], true);
   assert.ok(/value="fixed"[^>]*disabled/.test(html), "fixed radio disabled");
-  assert.ok(html.indexOf('id="destid"') === -1, "no select rendered");
+  assert.ok(html.indexOf('id="destlist"') === -1, "no dest list rendered");
   assert.ok(html.indexOf("Destination list unavailable") >= 0, "hint shown");
   // Without a list to fix on, the checked mode falls back to watch.
   assert.ok(/value="watch" checked/.test(html), "watch checked as fallback");
@@ -851,6 +862,16 @@ test("buildConfigPage is self-contained", function () {
   assert.ok(html.indexOf("http://") === -1 && html.indexOf("https://") === -1,
             "no external URLs");
   assert.ok(html.indexOf("pebblejs://close") >= 0, "cancel URL present");
+});
+
+test("buildConfigPage My Parks has filter, chips line and search keys", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
+  assert.ok(html.indexOf('id="mpfilter"') >= 0, "parks filter input");
+  assert.ok(html.indexOf('id="mplist"') >= 0, "parks scroll list");
+  assert.ok(html.indexOf("wireFilter('mpfilter','mplist')") >= 0, "filter wired");
+  assert.ok(html.indexOf('id="mpsel"') >= 0, "selected-chips container");
+  assert.ok(html.indexOf('id="mpcount"') >= 0, "selected count");
+  assert.ok(html.indexOf("updateMyParksCap") >= 0, "cap/chips JS present");
 });
 
 // ── buildConfigPage: My Parks section ────────────────────────────────────
@@ -907,9 +928,9 @@ test("buildConfigPage My Parks prefilled from settings", function () {
   var s = lib.defaultSettings();
   s.myParks = ["park-ep", "park-ioa"];
   var html = lib.buildConfigPage(s, MYPARKS_DESTS, true);
-  assert.ok(/value="park-ep" checked/.test(html), "EPCOT prechecked");
-  assert.ok(/value="park-ioa" checked/.test(html), "IoA prechecked");
-  assert.ok(!/value="park-mk" checked/.test(html), "MK not checked");
+  assert.ok(/value="park-ep"[^>]*checked/.test(html), "EPCOT prechecked");
+  assert.ok(/value="park-ioa"[^>]*checked/.test(html), "IoA prechecked");
+  assert.ok(!/value="park-mk"[^>]*checked/.test(html), "MK not checked");
 });
 
 test("buildConfigPage My Parks max-4 enforcement JS present", function () {
