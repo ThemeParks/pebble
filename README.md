@@ -1,12 +1,32 @@
 # ThemeParks.wiki — Pebble App
 
-A Pebble smartwatch app for [ThemeParks.wiki](https://themeparks.wiki) showing live wait times, show times, and opening hours. One app per destination (Walt Disney World, Disneyland Paris, etc.), all generated from this shared codebase.
+A Pebble smartwatch app for [ThemeParks.wiki](https://themeparks.wiki) showing live wait times, show times, and opening hours. Per-destination apps (WDW Queues, UOR Queues) and a browse-everywhere uber app (ThemePark Queues) are all generated from this shared codebase.
 
 Written in **pure Pebble C** targeting:
 - **Pebble Time 2** (`emery` — 200×228 rectangular colour)
 - **Pebble Round 2** (`gabbro` — 260×260 circular colour)
 
 <!-- (An earlier version used Moddable/XS JavaScript — we dropped it to save heap and get predictable memory footprint on the watch.) -->
+
+## Features
+
+- **Live waits + shows** with traffic-light colouring, favourites
+  pinned to the top (long-press SELECT on any ride to star it), sort
+  modes, and a silent five-minute auto-refresh that never loses your
+  place.
+- **Launcher glance (AppGlance)**: park hours as a live countdown
+  ("closes in 45 min", rendered by the firmware) plus up to a week of
+  upcoming hours — and, with My Parks configured, a packed live-wait
+  line like "MK 45m · EP 30m". Every slice expires rather than going
+  stale.
+- **Phone-side settings page** (gear icon in the Pebble app): AppGlance
+  toggle, **My Parks** (up to 4 parks whose waits feed the glance line,
+  filterable picker), and — uber app only — a **fixed destination**
+  mode that makes the watch open straight into your home resort.
+- **Locale aware**: times follow the watch's 12/24-hour setting;
+  distances render km or miles.
+- The uber app browses every ThemeParks.wiki destination, grouped by
+  region with a GPS-sorted nearby list.
 
 ## Prerequisites
 
@@ -93,28 +113,42 @@ python3 scripts/build_dest.py wdw --build --install emery
 pebble/
 ├── src/                          canonical source (edit here)
 │   ├── c/                        watch-side C code
-│   │   ├── main.c                entry point + lifecycle
-│   │   ├── api.c / api.h         AppMessage transport (+ watchdog, retry)
+│   │   ├── main.c                entry point, lifecycle, glance publisher
+│   │   ├── api.c / api.h         AppMessage transport (+ watchdog, retry, favs sync)
 │   │   ├── parkdata.c / .h       pipe-delimited parser + static park store
+│   │   ├── dest_parse.c / .h     destination-list parser (uber app)
 │   │   ├── sort.c / .h           index-based sort (favs pinned)
-│   │   ├── storage.c / .h        persist API (favs, sort mode, hours cache)
+│   │   ├── storage.c / .h        persist API + RAM caches (favs, hours, settings)
+│   │   ├── format.c / .h         pure display formatters (12/24h, km/mi, glance)
+│   │   ├── settings_parse.c / .h phone-settings wire parser
+│   │   ├── favs_sync.c / .h      favourites sync payload encoder
 │   │   ├── park_picker.c / .h    the destination's park list (custom icons)
+│   │   ├── dest_picker.c / .h    destination browser (uber app)
 │   │   ├── park_view.c / .h      attractions + shows pages, header, tabs
 │   │   ├── settings_view.c / .h  sort mode + favourites sub-menus
 │   │   ├── loading_view.c / .h   loading + error screen
+│   │   ├── ui_common.h           shared interaction conventions
 │   │   ├── colours.h             themed palette, round-display aware
 │   │   └── config.h / config.c   GENERATED from destinations/<name>.json
-│   └── pkjs/index.js             phone-side proxy: fetches + filters API data
+│   └── pkjs/
+│       ├── index.js              phone-side proxy: API fetches, settings page glue
+│       └── lib.js                pure helpers (unit-tested with plain node)
 ├── destinations/                 one JSON per destination (parks, icons, uuid)
-│   ├── wdw.json
-│   └── waltdisneyworldresort.json
+│   ├── wdw.json                  Walt Disney World
+│   ├── universalorlando.json     Universal Orlando Resort
+│   └── all.json                  the multi-destination uber app
+├── tests/
+│   ├── unit/                     host-compiled C tests (stubbed <pebble.h>)
+│   └── js/                       node tests for src/pkjs/lib.js
 ├── scripts/
 │   ├── build_dest.py             regenerate dist/<name>/ from src/ + JSON
+│   ├── unit_tests.py             host gcc + node unit-test runner
 │   ├── screenshots.py            boot emulator + capture every screen
 │   ├── soak_test.py              100+ park switches, crash detection
-│   └── integration_tests.py      button-driven e2e tests
+│   ├── integration_tests.py      button-driven e2e tests
+│   └── publish_dest.py           build + publish to the Rebble appstore
 ├── patches/                      pebble-tool / libpebble2 patches (see README inside)
-├── docs/                         design spec + implementation plan
+├── docs/                         design notes, known issues, future features
 ├── wscript                       Pebble waf build rules
 └── package.json                  app manifest (overridden per-destination at build)
 ```
@@ -152,6 +186,19 @@ The C struct `park_config_t` supports four icon tokens — `castle`, `sphere`, `
 
 ## Testing & tooling
 
+### Unit tests (host-side, no emulator)
+
+```bash
+python3 scripts/unit_tests.py            # all suites
+python3 scripts/unit_tests.py -k sort    # filter by name
+```
+
+Compiles the pure-logic C modules (`parkdata`, `sort`, `storage`,
+`format`, `dest_parse`, `settings_parse`, `favs_sync`) with plain gcc
+against a stubbed `<pebble.h>` + instrumented in-memory persist, and
+runs the node tests for `src/pkjs/lib.js`. The fast inner loop; CI runs
+it before any builds.
+
 ### Soak test (memory stability)
 
 ```bash
@@ -167,7 +214,7 @@ python3 scripts/build_dest.py wdw --build
 python3 scripts/integration_tests.py
 ```
 
-Seven tests covering startup, scroll, page switch, park-reload cycles, favourite toggle, BT drop, and the hours-prefetch handshake.
+Eight tests on the per-destination builds (startup, scroll, page switch, park-reload cycles, long-press favourite, settings favourite toggle, BT drop, hours prefetch); `--dest all` adds six uber-specific navigation tests (fourteen total). The suites are deterministic and must-pass in CI.
 
 ### Screenshots
 
@@ -271,7 +318,9 @@ The credentials live in the `pebble-sdk-home` Docker volume, so subsequent
 - **PKJS on the phone.** `src/pkjs/index.js` is a thin proxy that calls the ThemeParks.wiki HTTP API and sends a compact pipe-delimited payload back to the watch over AppMessage. The watch never touches HTTP directly.
 - **No JSON on the wire.** PKJS encodes park data as `pid|open|close\nA|id|name|status|wait\nS|id|name|status|t1,t2,…` and the C parser walks it into a static struct. This was originally a hack to survive the XS heap; it stayed because it's simpler than JSON.
 - **Hours prefetch.** At startup, after the PKJS ready signal, the watch asks for every known park's hours in one batch (`REQUEST_ALL_HOURS` → `ALL_HOURS_DATA`). That lets the park picker show "9 AM - 10 PM" under each park on first launch rather than only after the user has opened each park individually.
-- **Persist storage.** Favourites (per park × per list kind), sort mode, last-park, and the hours cache all live in the Pebble persist API. Key layout is documented at the top of `src/c/storage.c`.
+- **AppGlance.** On exit the watch publishes a queue of launcher slices: an optional packed My Parks wait line (computed phone-side, pushed with settings), today's hours as a firmware-rendered `time_until` countdown, and up to a week of future days — each with its own expiration so the launcher never shows stale data.
+- **Phone settings.** The config page is generated locally by PKJS and opened as a data URI (no hosting, works offline). Settings push to the watch as a tiny semicolon-separated `SETTINGS_DATA` payload; favourites flow the other way (`FAVS_SYNC`, full-state per toggle) into phone localStorage for future timeline features.
+- **Persist storage.** Favourites (identity-keyed per park UUID via a small LRU allocation index — destination-proof in the uber app), sort mode, last-park, glance state, and the hours cache all live in the Pebble persist API behind RAM caches, so draw paths never touch flash. Key layout is documented at the top of `src/c/storage.c`.
 - **Round displays.** `src/c/colours.h` uses `PBL_IF_COLOR_ELSE` and the C code uses `PBL_IF_ROUND_ELSE` for per-platform offsets. Custom row rendering in `park_view.c` and `park_picker.c` uses `graphics_text_attributes_enable_screen_text_flow` so long names wrap around the circle edge on gabbro.
 
 ## Troubleshooting
@@ -293,7 +342,8 @@ The Pebble firmware exited the app. Usually means either a crash (check logs), t
 - [Contributing](CONTRIBUTING.md) — dev setup, tests, PR process
 - [Security](SECURITY.md) — reporting vulnerabilities
 - [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Future design notes](docs/future/) — multi-destination + ride alerts ideas
+- [Known issues](docs/known-issues.md) — resolved + outstanding quirks
+- [Future design notes](docs/future/) — timeline pins, ride alerts, ride detail card
 
 ## API Reference
 
