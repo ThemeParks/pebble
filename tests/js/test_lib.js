@@ -485,7 +485,7 @@ test("filterLiveData shows keep only future times, max 4", function () {
 
 test("defaultSettings shape", function () {
   assert.deepStrictEqual(lib.defaultSettings(),
-    { v: 1, glance: true, destMode: "watch", destId: null });
+    { v: 1, glance: true, destMode: "watch", destId: null, myParks: [] });
 });
 
 test("parseSettings garbage yields defaults", function () {
@@ -500,27 +500,55 @@ test("parseSettings garbage yields defaults", function () {
 });
 
 test("parseSettings full round-trip", function () {
-  var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw" };
+  var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw",
+            myParks: ["park-a", "park-b"] };
   assert.deepStrictEqual(lib.parseSettings(JSON.stringify(s)), s);
 });
 
 test("parseSettings partials get defaults", function () {
   var got = lib.parseSettings('{"glance":false}');
   assert.deepStrictEqual(got,
-    { v: 1, glance: false, destMode: "watch", destId: null });
+    { v: 1, glance: false, destMode: "watch", destId: null, myParks: [] });
 });
 
 test("parseSettings mistyped fields fall back", function () {
   var got = lib.parseSettings(
-    '{"glance":"yes","destMode":"banana","destId":123,"v":"x"}');
+    '{"glance":"yes","destMode":"banana","destId":123,"v":"x","myParks":"a"}');
   assert.deepStrictEqual(got, lib.defaultSettings());
 });
 
 test("parseSettings unknown fields dropped", function () {
-  var got = lib.parseSettings('{"glance":false,"myParks":["a","b"],"zzz":1}');
-  assert.strictEqual(got.myParks, undefined);
+  var got = lib.parseSettings('{"glance":false,"futureThing":["a","b"],"zzz":1}');
+  assert.strictEqual(got.futureThing, undefined);
   assert.strictEqual(got.zzz, undefined);
   assert.strictEqual(got.glance, false);
+});
+
+test("parseSettings myParks absent yields empty array", function () {
+  assert.deepStrictEqual(lib.parseSettings('{"glance":true}').myParks, []);
+  assert.deepStrictEqual(lib.parseSettings(null).myParks, []);
+});
+
+test("parseSettings myParks junk entries dropped", function () {
+  // Non-strings, empty strings and nested junk are dropped; the good
+  // entries survive in order.
+  var got = lib.parseSettings(
+    '{"myParks":[42,"park-a",null,"",["x"],{"a":1},"park-b",true]}');
+  assert.deepStrictEqual(got.myParks, ["park-a", "park-b"]);
+  // Non-array myParks is junk wholesale.
+  assert.deepStrictEqual(lib.parseSettings('{"myParks":"park-a"}').myParks, []);
+  assert.deepStrictEqual(lib.parseSettings('{"myParks":{"0":"a"}}').myParks, []);
+});
+
+test("parseSettings myParks over-cap truncated to 4", function () {
+  var got = lib.parseSettings('{"myParks":["a","b","c","d","e","f"]}');
+  assert.deepStrictEqual(got.myParks, ["a", "b", "c", "d"]);
+  assert.strictEqual(lib.MYPARKS_MAX, 4);
+});
+
+test("parseSettings myParks duplicates collapse", function () {
+  var got = lib.parseSettings('{"myParks":["a","a","b","a","b"]}');
+  assert.deepStrictEqual(got.myParks, ["a", "b"]);
 });
 
 test("parseSettings version passthrough", function () {
@@ -545,6 +573,200 @@ test("encodeSettingsPayload both glance states", function () {
   var s = lib.defaultSettings();
   s.glance = false;
   assert.strictEqual(lib.encodeSettingsPayload(s), "glance=0");
+});
+
+test("encodeSettingsPayload appends the glance line segment", function () {
+  assert.strictEqual(
+    lib.encodeSettingsPayload(lib.defaultSettings(),
+                              "MK 45m · EP 30m", 1754081234),
+    "glance=1;line=MK 45m · EP 30m|1754081234");
+  // Empty text is the explicit clear.
+  assert.strictEqual(
+    lib.encodeSettingsPayload(lib.defaultSettings(), "", 0),
+    "glance=1;line=|0");
+  // null lineText → no segment at all (byte-identical to the old wire).
+  assert.strictEqual(
+    lib.encodeSettingsPayload(lib.defaultSettings(), null, 123),
+    "glance=1");
+});
+
+// ── parkCode ─────────────────────────────────────────────────────────────
+
+test("parkCode initials of capitalised words", function () {
+  assert.strictEqual(lib.parkCode("Magic Kingdom"), "MK");
+  assert.strictEqual(lib.parkCode("Epic Universe"), "EU");
+  assert.strictEqual(lib.parkCode("Disney's Hollywood Studios"), "DHS");
+});
+
+test("parkCode skips lowercase connectives", function () {
+  assert.strictEqual(lib.parkCode("Islands of Adventure"), "IA");
+  assert.strictEqual(lib.parkCode("Legoland at the Beach"), "LB");
+});
+
+test("parkCode counts camelCase inner capitals", function () {
+  // Device-found bug: Tokyo Disneyland and Tokyo DisneySea both read
+  // "TD" without the inner-capital rule.
+  assert.strictEqual(lib.parkCode("Tokyo DisneySea"), "TDS");
+  assert.strictEqual(lib.parkCode("Tokyo Disneyland"), "TD");
+});
+
+test("assignParkCodes disambiguates collisions", function () {
+  // Natural non-collision via camelCase:
+  assert.deepStrictEqual(
+    lib.assignParkCodes(["Tokyo Disneyland", "Tokyo DisneySea"]),
+    ["TD", "TDS"]);
+  // Forced collision: same initials, no camelCase help — the first
+  // differing flattened character disambiguates.
+  var codes = lib.assignParkCodes(["Magic Kingdom", "Magic Konda"]);
+  assert.notStrictEqual(codes[0], codes[1]);
+  assert.strictEqual(codes[0].slice(0, 2), "MK");
+  assert.strictEqual(codes[1].slice(0, 2), "MK");
+  // Non-colliding sets pass through untouched.
+  assert.deepStrictEqual(
+    lib.assignParkCodes(["Magic Kingdom", "Epic Universe"]),
+    ["MK", "EU"]);
+  // Truly identical names keep the shared code — nothing to tell apart.
+  assert.deepStrictEqual(
+    lib.assignParkCodes(["Legoland", "Legoland"]),
+    ["LEG", "LEG"]);
+});
+
+test("buildGlanceLine uses disambiguated codes", function () {
+  var line = lib.buildGlanceLine([
+    { name: "Tokyo Disneyland", wait: 5, ageMs: 1000 },
+    { name: "Tokyo DisneySea", wait: 7, ageMs: 1000 },
+  ], 0);
+  assert.strictEqual(line, "TD 5m · TDS 7m");
+});
+
+test("parkCode caps at 3 characters", function () {
+  assert.strictEqual(lib.parkCode("Disney's Animal Kingdom Theme Park"), "DAK");
+  assert.strictEqual(lib.parkCode("One Two Three Four Five"), "OTT");
+});
+
+test("parkCode single-word names take first 3 letters uppercased", function () {
+  assert.strictEqual(lib.parkCode("EPCOT"), "EPC");
+  assert.strictEqual(lib.parkCode("Efteling"), "EFT");
+  assert.strictEqual(lib.parkCode("waterpark"), "WAT");
+  // Short single words survive as-is.
+  assert.strictEqual(lib.parkCode("Zoo"), "ZOO");
+  assert.strictEqual(lib.parkCode("Q"), "Q");
+});
+
+test("parkCode digit-led words count as initials", function () {
+  assert.strictEqual(lib.parkCode("2nd Gate Park"), "2GP");
+});
+
+test("parkCode degenerate inputs", function () {
+  assert.strictEqual(lib.parkCode(""), "");
+  assert.strictEqual(lib.parkCode(null), "");
+  assert.strictEqual(lib.parkCode(undefined), "");
+  // Punctuation-only name has nothing usable.
+  assert.strictEqual(lib.parkCode(";;; ==="), "");
+  // Punctuation-led words contribute no initials; the fallback slice
+  // sees only alphanumerics, so the charset stays [A-Z0-9].
+  assert.strictEqual(lib.parkCode("=Bad ;Name"), "BAD");
+});
+
+// ── shortestOperatingWait ────────────────────────────────────────────────
+
+test("shortestOperatingWait picks min among operating", function () {
+  var a = [
+    ["id1", "Coaster", "O", 45],
+    ["id2", "Flume", "O", 10],
+    ["id3", "Spinner", "O", 30],
+  ];
+  assert.strictEqual(lib.shortestOperatingWait(a), 10);
+});
+
+test("shortestOperatingWait ignores closed and unknown waits", function () {
+  var a = [
+    ["id1", "Closed Short", "C", 0],     // closed — ignored
+    ["id2", "Down", "D", 5],             // down — ignored
+    ["id3", "No Wait", "O", null],       // operating, unknown wait
+    ["id4", "Real", "O", 25],
+  ];
+  assert.strictEqual(lib.shortestOperatingWait(a), 25);
+  // Zero is a real wait, not "missing".
+  a.push(["id5", "Walk On", "O", 0]);
+  assert.strictEqual(lib.shortestOperatingWait(a), 0);
+});
+
+test("shortestOperatingWait null when nothing usable", function () {
+  assert.strictEqual(lib.shortestOperatingWait([]), null);
+  assert.strictEqual(
+    lib.shortestOperatingWait([["id1", "X", "C", 5], ["id2", "Y", "O", null]]),
+    null);
+});
+
+// ── buildGlanceLine ──────────────────────────────────────────────────────
+
+var NOW = 1754000000000;
+
+test("buildGlanceLine composes in given order", function () {
+  var line = lib.buildGlanceLine([
+    { name: "Magic Kingdom", wait: 45, ageMs: 0 },
+    { name: "EPCOT", wait: 30, ageMs: 60000 },
+    { name: "Islands of Adventure", wait: 60, ageMs: 120000 },
+  ], NOW);
+  assert.strictEqual(line, "MK 45m · EPC 30m · IA 60m");
+});
+
+test("buildGlanceLine drops stale entries", function () {
+  var line = lib.buildGlanceLine([
+    { name: "Magic Kingdom", wait: 45, ageMs: 30 * 60 * 1000 },      // 30m — stale
+    { name: "EPCOT", wait: 30, ageMs: 29 * 60 * 1000 },              // just fresh
+    { name: "Islands of Adventure", wait: 60, ageMs: 31 * 60 * 1000 },
+  ], NOW);
+  assert.strictEqual(line, "EPC 30m");
+});
+
+test("buildGlanceLine accepts ts in place of ageMs", function () {
+  var line = lib.buildGlanceLine([
+    { name: "Magic Kingdom", wait: 45, ts: NOW - 60000 },
+    { name: "EPCOT", wait: 30, ts: NOW - 31 * 60 * 1000 },  // stale via ts
+  ], NOW);
+  assert.strictEqual(line, "MK 45m");
+});
+
+test("buildGlanceLine drops null/negative/non-numeric waits", function () {
+  var line = lib.buildGlanceLine([
+    { name: "Magic Kingdom", wait: null, ageMs: 0 },
+    { name: "EPCOT", wait: -5, ageMs: 0 },
+    { name: "Hollywood Studios", wait: "20", ageMs: 0 },
+    { name: "Animal Kingdom", wait: 15, ageMs: 0 },
+  ], NOW);
+  assert.strictEqual(line, "AK 15m");
+});
+
+test("buildGlanceLine empty cases", function () {
+  assert.strictEqual(lib.buildGlanceLine([], NOW), "");
+  assert.strictEqual(lib.buildGlanceLine([
+    { name: "Magic Kingdom", wait: null, ageMs: 0 },
+    { name: "", wait: 10, ageMs: 0 },              // no name → no code
+    { name: "EPCOT", wait: 10 },                    // no age info
+  ], NOW), "");
+});
+
+test("buildGlanceLine drops trailing entries over the 60-char budget", function () {
+  // Each entry renders as "AAA 100m" (8 chars) joined by " · " (3):
+  // 6 entries would be 63 chars, so only the first 5 (52) survive.
+  var entries = [];
+  for (var i = 0; i < 6; i++) {
+    entries.push({ name: "Alpha Aa Aa Park", wait: 100, ageMs: 0 });
+  }
+  var line = lib.buildGlanceLine(entries, NOW);
+  assert.strictEqual(line, "AAA 100m · AAA 100m · AAA 100m · AAA 100m · AAA 100m");
+  assert.ok(line.length <= 60, "line over budget: " + line.length);
+});
+
+test("buildGlanceLine output never carries wire separators", function () {
+  var line = lib.buildGlanceLine([
+    { name: "=Evil; |Name", wait: 10, ageMs: 0 },
+    { name: "M=K; P|ark", wait: 20, ageMs: 0 },
+  ], NOW);
+  assert.ok(!/[;=|]/.test(line), "forbidden char in: " + line);
+  assert.ok(line.length > 0, "hostile names should still produce codes");
 });
 
 // ── buildConfigPage ──────────────────────────────────────────────────────
@@ -629,6 +851,94 @@ test("buildConfigPage is self-contained", function () {
   assert.ok(html.indexOf("http://") === -1 && html.indexOf("https://") === -1,
             "no external URLs");
   assert.ok(html.indexOf("pebblejs://close") >= 0, "cancel URL present");
+});
+
+// ── buildConfigPage: My Parks section ────────────────────────────────────
+
+var MYPARKS_DESTS = [
+  { id: "dest-uni", name: "Universal Orlando", parkCount: 2, lat: 28.47, lon: -81.47,
+    parks: [
+      { id: "park-ioa", name: "Islands of Adventure", icon: "circle", color: "blue" },
+      { id: "park-usf", name: "Universal Studios Florida", icon: "circle", color: "red" },
+    ] },
+  { id: "dest-wdw", name: "Walt Disney World", parkCount: 2, lat: 28.4, lon: -81.6,
+    parks: [
+      { id: "park-mk", name: "Magic Kingdom", icon: "castle", color: "pink" },
+      { id: "park-ep", name: "EPCOT", icon: "sphere", color: "cyan" },
+    ] },
+  { id: "dest-empty", name: "Empty Dest", parkCount: 0, lat: 1, lon: 1, parks: [] },
+];
+
+var OWN_PARKS = [
+  { id: "park-mk", name: "Magic Kingdom" },
+  { id: "park-ep", name: "EPCOT" },
+];
+
+test("buildConfigPage uber: My Parks grouped by destination", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), MYPARKS_DESTS, true);
+  assert.ok(html.indexOf("My Parks") >= 0, "section present");
+  // Group headers alphabetical by destination name; park-less
+  // destinations get no header.
+  var uni = html.indexOf("<h3>Universal Orlando</h3>");
+  var wdw = html.indexOf("<h3>Walt Disney World</h3>");
+  assert.ok(uni >= 0 && wdw >= 0, "destination group headers");
+  assert.ok(uni < wdw, "groups sorted by destination name");
+  assert.ok(html.indexOf("<h3>Empty Dest</h3>") === -1, "empty dest skipped");
+  // One checkbox per park, under its destination's header.
+  var ioa = html.indexOf('value="park-ioa"');
+  var mk = html.indexOf('value="park-mk"');
+  assert.ok(ioa > uni && ioa < wdw, "IoA under Universal");
+  assert.ok(mk > wdw, "MK under WDW");
+  assert.ok(/name="mypark" value="park-ep"/.test(html), "checkbox markup");
+});
+
+test("buildConfigPage per-dest: My Parks from the parks argument", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), [], false, OWN_PARKS);
+  assert.ok(html.indexOf("My Parks") >= 0, "section present");
+  assert.ok(html.indexOf('value="park-mk"') >= 0, "MK checkbox");
+  assert.ok(html.indexOf('value="park-ep"') >= 0, "EPCOT checkbox");
+  assert.ok(html.indexOf("<h3>") === -1, "no destination grouping");
+  assert.ok(html.indexOf("Park list unavailable") === -1, "no hint");
+  // Still no Destination section in per-dest builds.
+  assert.ok(html.indexOf('name="destmode"') === -1, "no destmode radios");
+});
+
+test("buildConfigPage My Parks prefilled from settings", function () {
+  var s = lib.defaultSettings();
+  s.myParks = ["park-ep", "park-ioa"];
+  var html = lib.buildConfigPage(s, MYPARKS_DESTS, true);
+  assert.ok(/value="park-ep" checked/.test(html), "EPCOT prechecked");
+  assert.ok(/value="park-ioa" checked/.test(html), "IoA prechecked");
+  assert.ok(!/value="park-mk" checked/.test(html), "MK not checked");
+});
+
+test("buildConfigPage My Parks max-4 enforcement JS present", function () {
+  var html = lib.buildConfigPage(lib.defaultSettings(), MYPARKS_DESTS, true);
+  assert.ok(html.indexOf("updateMyParksCap") >= 0, "cap function present");
+  assert.ok(html.indexOf("disabled=(n>=4)") >= 0, "disable-at-4 logic");
+  // Save handler collects the checkboxes into myParks (clamped again).
+  assert.ok(html.indexOf("s.myParks=[]") >= 0, "save collects myParks");
+  assert.ok(html.indexOf("s.myParks.length<4") >= 0, "save re-clamps at 4");
+});
+
+test("buildConfigPage My Parks unavailable shows hint", function () {
+  // Uber with no dest list AND per-dest with no parks both degrade.
+  var uber = lib.buildConfigPage(lib.defaultSettings(), [], true);
+  assert.ok(uber.indexOf("Park list unavailable") >= 0, "uber hint");
+  var perDest = lib.buildConfigPage(lib.defaultSettings(), [], false, []);
+  assert.ok(perDest.indexOf("Park list unavailable") >= 0, "per-dest hint");
+  assert.ok(perDest.indexOf('name="mypark"') === -1, "no checkboxes");
+});
+
+test("buildConfigPage My Parks escapes park names", function () {
+  var dests = [{ id: "d1", name: "Dest & <Co>", parkCount: 1, lat: 28.4, lon: -81.6,
+                 parks: [{ id: 'p"><script>', name: "Park & <Name>" }] }];
+  var html = lib.buildConfigPage(lib.defaultSettings(), dests, true);
+  assert.ok(html.indexOf("Park &amp; &lt;Name&gt;") >= 0, "park name escaped");
+  assert.ok(html.indexOf('value="p&quot;&gt;&lt;script&gt;"') >= 0,
+            "park id escaped");
+  assert.ok(html.indexOf("<h3>Dest &amp; &lt;Co&gt;</h3>") >= 0,
+            "group header escaped");
 });
 
 // ── summary ──────────────────────────────────────────────────────────────

@@ -194,6 +194,88 @@ static void test_glance_reads_stay_in_ram(void)
 	ASSERT_EQ_INT(before, persist_stub_read_count());
 }
 
+static void test_glance_line_default(void)
+{
+	/* Never set → nothing to show; out buffers untouched by contract. */
+	reset_all();
+	char line[GLANCE_LINE_MAX];
+	uint32_t exp = 0xdead;
+	ASSERT_TRUE(!storage_get_glance_line(line, &exp));
+	ASSERT_EQ_INT(0xdead, exp);
+}
+
+static void test_glance_line_roundtrip(void)
+{
+	reset_all();
+	storage_set_glance_line("MK 45m · EP 30m", 1754081234u);
+	char line[GLANCE_LINE_MAX];
+	uint32_t exp = 0;
+	ASSERT_TRUE(storage_get_glance_line(line, &exp));
+	ASSERT_EQ_STR("MK 45m · EP 30m", line);
+	ASSERT_EQ_INT(1754081234LL, (long long)exp);
+
+	/* Overwrite replaces both text and expiry. */
+	storage_set_glance_line("IA 60m", 42u);
+	ASSERT_TRUE(storage_get_glance_line(line, &exp));
+	ASSERT_EQ_STR("IA 60m", line);
+	ASSERT_EQ_INT(42, (long long)exp);
+}
+
+static void test_glance_line_empty_set_clears(void)
+{
+	reset_all();
+	storage_set_glance_line("MK 45m", 42u);
+	storage_set_glance_line("", 99u);
+	char line[GLANCE_LINE_MAX];
+	ASSERT_TRUE(!storage_get_glance_line(line, NULL));
+	/* Cleared in persist too, not just the RAM cache. */
+	storage_init();
+	ASSERT_TRUE(!storage_get_glance_line(line, NULL));
+	/* NULL text clears the same way, and never crashes. */
+	storage_set_glance_line("MK 45m", 42u);
+	storage_set_glance_line(NULL, 0u);
+	ASSERT_TRUE(!storage_get_glance_line(line, NULL));
+}
+
+static void test_glance_line_persists(void)
+{
+	/* Set must write through immediately — verified by re-arming the
+	 * lazy cache (simulated relaunch) and re-reading from persist. */
+	reset_all();
+	storage_set_glance_line("MK 45m · EP 30m", 1754081234u);
+	storage_init();   /* forget the RAM cache */
+	char line[GLANCE_LINE_MAX];
+	uint32_t exp = 0;
+	ASSERT_TRUE(storage_get_glance_line(line, &exp));
+	ASSERT_EQ_STR("MK 45m · EP 30m", line);
+	ASSERT_EQ_INT(1754081234LL, (long long)exp);
+}
+
+static void test_glance_line_reads_stay_in_ram(void)
+{
+	/* Lazy cache contract, hit and miss both: one persist probe on the
+	 * first query, then RAM only. */
+	reset_all();
+	storage_set_glance_line("MK 45m", 42u);
+	storage_init();
+	char line[GLANCE_LINE_MAX];
+	storage_get_glance_line(line, NULL);   /* warm */
+	int before = persist_stub_read_count();
+	for (int i = 0; i < 50; i++) {
+		ASSERT_TRUE(storage_get_glance_line(line, NULL));
+	}
+	ASSERT_EQ_INT(before, persist_stub_read_count());
+
+	/* The miss is cached too. */
+	storage_set_glance_line("", 0u);
+	storage_get_glance_line(line, NULL);   /* warm the miss */
+	before = persist_stub_read_count();
+	for (int i = 0; i < 50; i++) {
+		ASSERT_TRUE(!storage_get_glance_line(line, NULL));
+	}
+	ASSERT_EQ_INT(before, persist_stub_read_count());
+}
+
 static void test_last_park(void)
 {
 	reset_all();
@@ -289,6 +371,11 @@ int main(void)
 	RUN_TEST(test_glance_enabled_roundtrip);
 	RUN_TEST(test_glance_enabled_persists);
 	RUN_TEST(test_glance_reads_stay_in_ram);
+	RUN_TEST(test_glance_line_default);
+	RUN_TEST(test_glance_line_roundtrip);
+	RUN_TEST(test_glance_line_empty_set_clears);
+	RUN_TEST(test_glance_line_persists);
+	RUN_TEST(test_glance_line_reads_stay_in_ram);
 	RUN_TEST(test_last_park);
 	RUN_TEST(test_fav_queries_stay_in_ram);
 	RUN_TEST(test_hours_queries_stay_in_ram);

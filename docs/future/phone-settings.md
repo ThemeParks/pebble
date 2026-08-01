@@ -4,10 +4,10 @@
 
 A Pebble config page (the standard phone-side settings webview) for
 settings that don't belong on a watch button: the AppGlance toggle and,
-in the uber app, a fixed-destination mode. **v1 (this iteration)
-shipped the config-page mechanism, the AppGlance on/off toggle, and the
-uber build's Destination mode with a fixed-destination dropdown.** The
-My Parks multi-select remains future work (see below).
+in the uber app, a fixed-destination mode. **v1 shipped the config-page
+mechanism, the AppGlance on/off toggle, and the uber build's
+Destination mode with a fixed-destination dropdown.** The My Parks
+multi-select shipped next — see "My Parks (implemented)" below.
 
 ## What shipped (v1)
 
@@ -141,38 +141,96 @@ behaves exactly like a per-destination build:
   → watch persist chain) remains outstanding — the standard end-to-end
   check once network access is available.
 
+## My Parks (multi-select, up to 4) — implemented
+
+The parks whose live info the user wants surfaced OUTSIDE the app: a
+packed multi-park wait line in the launcher glance. Selectable across
+destinations in the uber build (a Florida local wants MK, EPCOT and
+Islands of Adventure regardless of what they browse on-watch);
+per-destination builds restrict the choice to their own parks.
+Independent of Destination mode.
+
+### Settings schema
+
+`myParks: ["<parkUuid>", ...]` joined the settings JSON (still `v: 1` —
+the field is additive and optional). `parseSettings` tolerates absence
+(→ `[]`), drops junk entries (non-strings, empty strings, a non-array
+wholesale), dedupes, and truncates past the cap (`MYPARKS_MAX = 4`).
+
+The config page grew a "My Parks" checkbox section: the uber build
+lists every destination's parks grouped by destination name
+(alphabetical, from the cached `fetchDestList()`); per-destination
+builds pass their own parks into `buildConfigPage(settings, dests,
+isUber, parks)` — resolved from the dest list entry matching the
+build's `DESTINATION_ID`, filtered to `ALL_PARK_IDS` (the API
+destination may carry water parks the watch app doesn't ship). Page JS
+disables the unchecked boxes once 4 are checked and the save handler
+re-clamps. When the list can't be fetched the section degrades to a
+hint, like the destination dropdown.
+
+### Park codes (`lib.parkCode`)
+
+The packed line needs 2–3 char park codes:
+
+- Words starting with an uppercase letter or digit contribute their
+  first character; lowercase-led connectives are skipped:
+  "Magic Kingdom" → "MK", "Islands of Adventure" → "IA",
+  "Epic Universe" → "EU", "Disney's Hollywood Studios" → "DHS".
+- Codes cap at 3 chars ("Disney's Animal Kingdom Theme Park" → "DAK").
+- Fewer than 2 qualifying initials (single-word names, lowercase-only
+  names): first 3 alphanumeric characters uppercased — "EPCOT" → "EPC",
+  "Efteling" → "EFT".
+- Charset is [A-Z0-9] by construction — wire-safe (below).
+- Honest limitation: codes aren't guaranteed unique — "Tokyo
+  Disneyland" and "Tokyo DisneySea" both code to "TD", so that pairing
+  reads as "TD 5m · TD 30m". Order still matches the selection order,
+  and a smarter disambiguator wouldn't fit 3 chars anyway.
+
+### Wire format
+
+`SETTINGS_DATA` gained a `line` segment:
+`glance=1;line=MK 45m · EP 30m|<expiryEpochSecs>`. The value splits on
+its LAST `|`; the expiry must be 1–10 digits fitting uint32, else the
+whole field parses as absent. The text is raw UTF-8 — no escaping
+needed because `lib.buildGlanceLine` guarantees it never contains `;`,
+`=` or `|` (park codes are [A-Z0-9], waits render as `<N>m`, the
+separator is the UTF-8 middle dot, and a final strip enforces it).
+Empty text (`line=|0`) is the explicit clear, pushed whenever
+`myParks` is empty. Older watch binaries ignore the unknown segment.
+
+The watch persists text + expiry (storage keys 4/5, RAM-cached,
+empty-set clears) and `publish_glance()` makes an unexpired line the
+FIRST slice — replacing the locally-composed single-park wait rung;
+countdown and future-day slices still follow. It sits outside the
+current-park guard, so uber picker exits (which publish no wait rung)
+still show it. Absent/expired → exactly the old behaviour.
+
+### Staleness model (the glance must never lie)
+
+PKJS only runs while the watch app talks to it, so the packed line is a
+snapshot of last app use, bounded three ways:
+
+- PKJS keeps a per-park `{name, wait, ts}` snapshot (localStorage
+  `tpw_waits`, `wait` = shortest operating wait, the same headline
+  shape the watch composes), refreshed on every park-data cache save.
+- Before each push it re-fetches any selected park whose cache is
+  stale (max 4 requests through the normal `fetchAndFilter`/cache
+  path), then `buildGlanceLine` drops entries older than 30 min.
+- The pushed expiry is now + 30 min, and the watch re-checks it at
+  publish time; the launcher's slice expiration retires it after that.
+
+The line is (re)pushed after every `sendParkData` and on every settings
+push (save + the ready handshake). Truly live background waits still
+need server-pushed timeline topic pins (see timeline-pins.md) — out of
+scope here.
+
+### My Parks × timeline (still future)
+
+The set should also drive timeline pins (per-park hours pins,
+favourited showtimes — see docs/future/timeline-pins.md; pins remain
+future work). Live WAIT times do not belong in pins.
+
 ## Future work
-
-### My Parks (multi-select, up to ~4) — deferred
-
-The parks whose live info the user wants surfaced OUTSIDE the app — in
-the launcher glance and on the timeline. Selectable across destinations
-(a Florida local wants MK, EPCOT and Islands of Adventure regardless of
-which destination they browse on-watch). Independent of Destination
-mode. The settings JSON's `v` field exists so this can be added as e.g.
-`myParks: [id, ...]` with a clean migration.
-
-- **My Parks glance line**: AppGlance shows ONE subtitle at a time
-  (slices are an expiration-ordered queue, not a carousel), so
-  multi-park means packing one line: "MK 45m · EP 30m · IoA 60m". The
-  watch only ever holds one park's live data, so PKJS precomputes the
-  packed line and pushes it with the settings payload (e.g.
-  `glanceline=<text>|<expiry>` — the wire format's `;key=value`
-  extension point). The watch persists it and publish_glance() prefers
-  it over the locally-composed single-park line. Budget: ~150 bytes
-  subtitle; 4 parks × "XX 45m · " fits with short park codes.
-- Freshness: PKJS only runs while the watch app talks to it, so a
-  packed WAIT line is a snapshot of last app use. The glance must never
-  lie: waits get a hard expiry (~30 min); durable rungs carry hours and
-  firmware-rendered countdowns. Truly live background waits need
-  server-pushed timeline topic pins (see timeline-pins.md) — out of
-  scope here.
-- Per-destination builds would restrict the multi-select to that
-  destination's parks (PKJS knows the flavour from
-  `DESTINATION_ID != null`).
-- My Parks × timeline: the set also drives timeline pins (per-park
-  hours pins, favourited showtimes — see docs/future/timeline-pins.md).
-  Live WAIT times do not belong in pins.
 
 ### Other deferred items
 

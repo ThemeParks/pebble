@@ -38,6 +38,16 @@ void storage_set_sort_mode(sort_mode_t mode);
 bool storage_get_glance_enabled(void);
 void storage_set_glance_enabled(bool enabled);
 
+/* Packed My Parks glance line ("MK 45m · EP 30m"), composed phone-side
+ * and pushed with the settings payload. publish_glance() prefers it —
+ * while expiry (epoch secs) is still in the future — over the locally
+ * composed single-park wait rung. Get returns false when none stored
+ * (out buffers untouched). Setting an empty/NULL text clears.
+ * Keep in sync with SETTINGS_LINE_MAX in settings_parse.h. */
+#define GLANCE_LINE_MAX 80
+bool storage_get_glance_line(char out[GLANCE_LINE_MAX], uint32_t *expiry_out);
+void storage_set_glance_line(const char *text, uint32_t expiry);
+
 const char *storage_get_last_park(void);   /* returns NULL if unset */
 void storage_set_last_park(const char *park_id);
 

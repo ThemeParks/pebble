@@ -300,14 +300,18 @@ function haversineDist(lat1, lon1, lat2, lon2) {
 // ── Phone-side settings ──────────────────────────────────────────────────
 //
 // Settings JSON (localStorage "tpw_settings" and the webview's close
-// payload). Versioned from day one so later additions (My Parks, units
-// override, ...) migrate cleanly:
-//   { v: 1, glance: true, destMode: "watch"|"fixed", destId: null|"<uuid>" }
+// payload). Versioned from day one so later additions (units override,
+// ...) migrate cleanly:
+//   { v: 1, glance: true, destMode: "watch"|"fixed", destId: null|"<uuid>",
+//     myParks: ["<parkUuid>", ...] }
 // destMode/destId only mean anything in the uber build; per-destination
-// builds carry them inert.
+// builds carry them inert. myParks (cap MYPARKS_MAX) drives the packed
+// multi-park glance line pushed to the watch.
+
+var MYPARKS_MAX = 4;
 
 function defaultSettings() {
-  return { v: 1, glance: true, destMode: "watch", destId: null };
+  return { v: 1, glance: true, destMode: "watch", destId: null, myParks: [] };
 }
 
 // Tolerant parse of a stored/returned settings JSON string. Unknown
@@ -328,16 +332,156 @@ function parseSettings(json) {
   // A fixed mode without a destination to fix on is meaningless — treat
   // it as "watch" so PKJS never tries to serve a null destination.
   if (s.destMode === "fixed" && !s.destId) s.destMode = "watch";
+  // myParks: keep only non-empty strings, dedupe, truncate at the cap —
+  // a hand-mangled localStorage entry degrades to fewer parks, never to
+  // a wedged parse.
+  if (Object.prototype.toString.call(p.myParks) === "[object Array]") {
+    for (var i = 0; i < p.myParks.length && s.myParks.length < MYPARKS_MAX; i++) {
+      var id = p.myParks[i];
+      if (typeof id !== "string" || !id) continue;
+      var dup = false;
+      for (var j = 0; j < s.myParks.length; j++) {
+        if (s.myParks[j] === id) { dup = true; break; }
+      }
+      if (!dup) s.myParks.push(id);
+    }
+  }
   return s;
 }
 
 // Compact wire string pushed to the watch under SETTINGS_DATA. Format:
 // semicolon-separated key=value segments ("glance=1"); the watch parser
 // (settings_parse.c) ignores unknown segments, so future fields append
-// as ";key=value" without breaking older watch binaries. v1 only sends
-// what the watch needs: the glance flag (destMode is applied phone-side).
-function encodeSettingsPayload(settings) {
-  return "glance=" + (settings.glance ? "1" : "0");
+// as ";key=value" without breaking older watch binaries. Sends only what
+// the watch needs: the glance flag (destMode is applied phone-side) and,
+// when lineText is non-null, the packed My Parks glance line as
+// ";line=<text>|<expiryEpochSecs>". An empty lineText clears the watch's
+// stored line. The text needs no escaping: buildGlanceLine guarantees it
+// carries no ';', '=' or '|' (see settings_parse.c, which splits the
+// value on its LAST '|' regardless).
+function encodeSettingsPayload(settings, lineText, lineExpirySecs) {
+  var out = "glance=" + (settings.glance ? "1" : "0");
+  if (lineText != null) {
+    out += ";line=" + lineText + "|" + (lineExpirySecs == null ? 0 : lineExpirySecs);
+  }
+  return out;
+}
+
+// ── My Parks glance line ─────────────────────────────────────────────────
+
+// Short code for a park name, used in the packed My Parks glance line.
+// Rules (unit-tested):
+//   * Each word starting with an uppercase letter or a digit contributes
+//     its first character; lowercase-led connectives ("of", "the") are
+//     skipped. "Magic Kingdom" → "MK", "Islands of Adventure" → "IA",
+//     "Epic Universe" → "EU", "Disney's Hollywood Studios" → "DHS".
+//   * Codes cap at 3 characters ("Disney's Animal Kingdom Theme Park"
+//     → "DAK").
+//   * When fewer than 2 initials qualify (single-word names, whatever
+//     their casing, and lowercase-only names), fall back to the first 3
+//     alphanumeric characters of the name, uppercased: "EPCOT" → "EPC",
+//     "Efteling" → "EFT".
+//   * Output charset is [A-Z0-9] by construction — safe for the
+//     ';'-separated settings wire format.
+function parkCode(name) {
+  if (!name) return "";
+  // An "initial" is an uppercase letter or digit at the start of a word
+  // OR an inner camelCase capital (previous char lowercase): device
+  // testing found "Tokyo Disneyland"/"Tokyo DisneySea" both reducing to
+  // "TD" — the inner S must count so DisneySea reads TDS.
+  var s = String(name);
+  var initials = "";
+  var prev = " ";
+  for (var i = 0; i < s.length && initials.length < 3; i++) {
+    var c = s.charAt(i);
+    var isUpperOrDigit = (c >= "A" && c <= "Z") || (c >= "0" && c <= "9");
+    var wordStart = prev === " " || prev === "-";
+    var innerCap = c >= "A" && c <= "Z" && prev >= "a" && prev <= "z";
+    if (isUpperOrDigit && (wordStart || innerCap)) initials += c;
+    prev = c === " " || c === "-" ? " " : c;
+  }
+  if (initials.length >= 2) return initials;
+  var flat = s.replace(/[^A-Za-z0-9]/g, "");
+  return flat.slice(0, 3).toUpperCase();
+}
+
+// Unique short codes for a set of park names. Codes that still collide
+// (same initials, no camelCase help) get the first character at which
+// the two flattened names differ appended, so e.g. two hypothetical
+// "Magic Kingdom"/"Magic Kingdom West" render MKX/MKW-style instead of
+// an ambiguous "MK 45m · MK 30m" line.
+function assignParkCodes(names) {
+  var codes = [];
+  for (var i = 0; i < names.length; i++) codes.push(parkCode(names[i]));
+  for (var a = 0; a < codes.length; a++) {
+    for (var b = a + 1; b < codes.length; b++) {
+      if (!codes[a] || codes[a] !== codes[b]) continue;
+      var fa = String(names[a]).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      var fb = String(names[b]).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      /* Truly identical names (two "Legoland"s in different countries)
+       * have no distinguishing letters — the shared code is honest. */
+      if (fa === fb) continue;
+      var j = 0;
+      while (j < fa.length && j < fb.length && fa.charAt(j) === fb.charAt(j)) j++;
+      codes[a] = (codes[a] + (j < fa.length ? fa.charAt(j) : "X")).slice(0, 4);
+      codes[b] = (codes[b] + (j < fb.length ? fb.charAt(j) : "Y")).slice(0, 4);
+    }
+  }
+  return codes;
+}
+
+// Shortest wait among operating attractions — the same "headline wait"
+// shape the watch's glance composes (glance_headline in main.c), minus
+// favourites, which don't apply phone-side. `attractions` are the
+// compact [id, name, status, waitMins] arrays from filterLiveData.
+// Returns null when nothing is operating with a known wait.
+function shortestOperatingWait(attractions) {
+  var best = null;
+  for (var i = 0; i < attractions.length; i++) {
+    var a = attractions[i];
+    if (a[2] !== "O" || a[3] == null) continue;
+    if (best === null || a[3] < best) best = a[3];
+  }
+  return best;
+}
+
+// Compose the packed My Parks glance line: "MK 45m · EP 30m · IA 60m".
+// entries: [{name, wait, ageMs}] in display order (ts — absolute ms —
+// is accepted in place of ageMs, aged against nowMs). Skipped entries:
+// null/negative/non-numeric wait, unknown age, or age >= 30 min — the
+// launcher must never show fossils. Budget: 60 chars (well under the
+// ~150-byte slice cap even with 3-byte '·'s); trailing entries that
+// would overflow are dropped. The result must reach the wire unescaped,
+// so it is guaranteed free of ';' and '=' (settings segment/kv
+// separators) and '|' (the line/expiry separator): park codes are
+// [A-Z0-9], everything else is composed here, and a final strip
+// enforces it against future edits. Returns "" when nothing is usable.
+var GLANCE_LINE_MAX_CHARS = 60;
+var GLANCE_LINE_STALE_MS = 30 * 60 * 1000;
+function buildGlanceLine(entries, nowMs) {
+  var now = nowMs === undefined ? Date.now() : nowMs;
+  // Codes assigned over the whole set, collision-disambiguated, so two
+  // similarly named parks never render as the same code.
+  var names = [];
+  for (var n = 0; n < entries.length; n++) {
+    names.push(entries[n] ? entries[n].name : "");
+  }
+  var codes = assignParkCodes(names);
+  var out = "";
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    if (!e) continue;
+    if (typeof e.wait !== "number" || !isFinite(e.wait) || e.wait < 0) continue;
+    var age = e.ageMs != null ? e.ageMs : (e.ts != null ? now - e.ts : null);
+    if (age == null || age >= GLANCE_LINE_STALE_MS) continue;
+    var code = codes[i].replace(/[;=|]/g, "");
+    if (!code) continue;
+    var part = code + " " + Math.round(e.wait) + "m";
+    var candidate = out ? out + " · " + part : part;
+    if (candidate.length > GLANCE_LINE_MAX_CHARS) break;
+    out = candidate;
+  }
+  return out.replace(/[;=|]/g, "");
 }
 
 // Minimal HTML escaping for text nodes and double-quoted attributes.
@@ -352,13 +496,16 @@ function escapeHtml(s) {
 // Build the full self-contained config-page HTML (inline CSS/JS, no
 // external resources — the phone webview may be offline). `dests` is the
 // fetchDestList() result array ([] when unavailable); isUber gates the
-// Destination section. Page JS stays ES5 — some phone webviews are as
-// old as the PKJS interpreter.
+// Destination section. `parks` ([{id, name}]) feeds the My Parks section
+// in per-destination builds; the uber build ignores it and lists every
+// destination's parks (dests[].parks) grouped by destination instead.
+// Page JS stays ES5 — some phone webviews are as old as the PKJS
+// interpreter.
 //
 // Save navigates to pebblejs://close#<encodeURIComponent(settings JSON)>;
 // Cancel navigates to pebblejs://close with no payload — index.js treats
 // an absent/empty e.response as "no change".
-function buildConfigPage(settings, dests, isUber) {
+function buildConfigPage(settings, dests, isUber, parks) {
   var h = [];
   h.push("<!DOCTYPE html><html><head>");
   h.push('<meta charset="utf-8">');
@@ -369,6 +516,7 @@ function buildConfigPage(settings, dests, isUber) {
   h.push("h1{font-size:1.3em;margin:0 0 12px;}");
   h.push(".card{background:#fff;border-radius:6px;padding:12px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,0.15);}");
   h.push(".card h2{font-size:1em;margin:0 0 8px;}");
+  h.push(".card h3{font-size:0.85em;margin:10px 0 2px;color:#555;}");
   h.push("label{display:block;margin:6px 0;}");
   h.push("select{width:100%;margin-top:6px;}");
   h.push(".hint{font-size:0.85em;color:#666;margin:6px 0 0;}");
@@ -432,6 +580,56 @@ function buildConfigPage(settings, dests, isUber) {
     h.push("</div>");
   }
 
+  // My Parks multi-select (cap MYPARKS_MAX): the parks whose live waits
+  // get packed into the launcher glance line. Uber: every destination's
+  // parks, grouped by destination name (alphabetical, matching the
+  // dropdown's data source); per-destination builds: the build's own
+  // parks via `parks`. Prefilled from settings.myParks; the cap is
+  // enforced by page JS (unchecked boxes disable at the cap) AND
+  // re-clamped in the save handler.
+  var myParks = settings.myParks || [];
+  function checkedAttr(id) {
+    for (var m = 0; m < myParks.length; m++) {
+      if (myParks[m] === id) return " checked";
+    }
+    return "";
+  }
+  function parkBox(pk) {
+    h.push('<label><input type="checkbox" name="mypark" value="'
+           + escapeHtml(pk.id) + '"' + checkedAttr(pk.id) + "> "
+           + escapeHtml(pk.name) + "</label>");
+  }
+  h.push('<div class="card"><h2>My Parks</h2>');
+  h.push('<p class="hint">Pick up to 4 parks to show live waits for in the launcher.</p>');
+  var anyParks = false;
+  if (isUber) {
+    if (dests && dests.length > 0) {
+      var sortedDests = dests.slice().sort(function (a, b) {
+        if (a.name < b.name) return -1;
+        if (a.name > b.name) return 1;
+        return 0;
+      });
+      for (var sd = 0; sd < sortedDests.length; sd++) {
+        var dp = sortedDests[sd].parks || [];
+        if (dp.length === 0) continue;
+        anyParks = true;
+        h.push("<h3>" + escapeHtml(sortedDests[sd].name) + "</h3>");
+        for (var pp = 0; pp < dp.length; pp++) parkBox(dp[pp]);
+      }
+    }
+  } else if (parks && parks.length > 0) {
+    anyParks = true;
+    for (var op = 0; op < parks.length; op++) parkBox(parks[op]);
+  }
+  if (!anyParks) {
+    // Same degradation as the dropdown: the page still opens, this
+    // section just can't offer anything. (Wording avoids the exact
+    // dropdown hint so tests can tell the two apart.)
+    h.push('<p class="hint">Park list unavailable — check the phone\'s '
+           + "internet connection and reopen this page.</p>");
+  }
+  h.push("</div>");
+
   h.push('<div class="buttons">');
   h.push('<button id="cancel" type="button">Cancel</button>');
   h.push('<button id="save" type="button">Save</button>');
@@ -446,6 +644,15 @@ function buildConfigPage(settings, dests, isUber) {
          + "if(s){s.disabled=radioVal('destmode')!=='fixed';}}");
   h.push("var radios=document.getElementsByName('destmode');"
          + "for(var i=0;i<radios.length;i++){radios[i].onchange=setDestEnabled;}");
+  // My Parks cap: once MYPARKS_MAX boxes are checked, disable the
+  // unchecked ones; un-checking re-enables. Runs on load too so a
+  // prefilled-at-cap page starts locked.
+  h.push("function updateMyParksCap(){var b=document.getElementsByName('mypark');"
+         + "var n=0;var i;for(i=0;i<b.length;i++){if(b[i].checked)n++;}"
+         + "for(i=0;i<b.length;i++){if(!b[i].checked)b[i].disabled=(n>=" + MYPARKS_MAX + ");}}");
+  h.push("var mpb=document.getElementsByName('mypark');"
+         + "for(var mi=0;mi<mpb.length;mi++){mpb[mi].onchange=updateMyParksCap;}"
+         + "updateMyParksCap();");
   h.push("document.getElementById('cancel').onclick=function(){"
          + "document.location='pebblejs://close';};");
   h.push("document.getElementById('save').onclick=function(){"
@@ -455,6 +662,10 @@ function buildConfigPage(settings, dests, isUber) {
          + "var sel=document.getElementById('destid');"
          + "s.destMode=(mode==='fixed'&&sel&&sel.value)?'fixed':'watch';"
          + "s.destId=(s.destMode==='fixed')?sel.value:null;"
+         + "s.myParks=[];"
+         + "var mp=document.getElementsByName('mypark');"
+         + "for(var pi=0;pi<mp.length;pi++){"
+         + "if(mp[pi].checked&&s.myParks.length<" + MYPARKS_MAX + ")s.myParks.push(mp[pi].value);}"
          + "document.location='pebblejs://close#'+encodeURIComponent(JSON.stringify(s));};");
   h.push("</" + "script>");
   h.push("</body></html>");
@@ -523,4 +734,9 @@ module.exports = {
   encodeSettingsPayload: encodeSettingsPayload,
   escapeHtml: escapeHtml,
   buildConfigPage: buildConfigPage,
+  MYPARKS_MAX: MYPARKS_MAX,
+  parkCode: parkCode,
+  assignParkCodes: assignParkCodes,
+  shortestOperatingWait: shortestOperatingWait,
+  buildGlanceLine: buildGlanceLine,
 };

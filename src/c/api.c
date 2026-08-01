@@ -133,6 +133,12 @@ static void dispatch_payload(uint32_t key, char *buf, uint16_t len)
 			APP_LOG(APP_LOG_LEVEL_INFO, "settings: glance %s",
 			        sm.glance ? "on" : "off");
 		}
+		if (sm.has_line) {
+			/* Empty text clears the stored line (storage contract). */
+			storage_set_glance_line(sm.line_text, sm.line_expiry);
+			APP_LOG(APP_LOG_LEVEL_INFO, "settings: line %s",
+			        sm.line_text[0] ? sm.line_text : "(clear)");
+		}
 		return;
 	}
 #ifdef MULTI_DESTINATION

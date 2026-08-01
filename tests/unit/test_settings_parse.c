@@ -92,6 +92,100 @@ static void test_len_bounds_respected(void)
 	ASSERT_TRUE(m.glance);
 }
 
+/* --- "line" segment (packed My Parks glance line) -------------------- */
+
+static void test_line_valid(void)
+{
+	/* The real PKJS shape: UTF-8 middle dots, spaces, digits. */
+	settings_msg_t m =
+		parse_str("glance=1;line=MK 45m · EP 30m · IA 60m|1754081234");
+	ASSERT_TRUE(m.has_glance);
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_STR("MK 45m · EP 30m · IA 60m", m.line_text);
+	ASSERT_EQ_INT(1754081234, (long long)m.line_expiry);
+}
+
+static void test_line_alone(void)
+{
+	/* Line without a glance segment still parses (fields independent). */
+	settings_msg_t m = parse_str("line=EPC 20m|99");
+	ASSERT_TRUE(!m.has_glance);
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_STR("EPC 20m", m.line_text);
+	ASSERT_EQ_INT(99, (long long)m.line_expiry);
+}
+
+static void test_line_missing(void)
+{
+	ASSERT_TRUE(!parse_str("glance=1").has_line);
+	ASSERT_TRUE(!parse_str("").has_line);
+}
+
+static void test_line_empty_text_clears(void)
+{
+	/* "line=|0" is the explicit clear: has_line with empty text. */
+	settings_msg_t m = parse_str("glance=1;line=|0");
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_STR("", m.line_text);
+	ASSERT_EQ_INT(0, (long long)m.line_expiry);
+}
+
+static void test_line_malformed_expiry(void)
+{
+	ASSERT_TRUE(!parse_str("line=MK 45m|abc").has_line);   /* not digits */
+	ASSERT_TRUE(!parse_str("line=MK 45m|12x4").has_line);  /* mixed */
+	ASSERT_TRUE(!parse_str("line=MK 45m|").has_line);      /* empty */
+	ASSERT_TRUE(!parse_str("line=MK 45m").has_line);       /* no pipe */
+	ASSERT_TRUE(!parse_str("line=MK 45m|-5").has_line);    /* sign */
+	/* 11 digits / over uint32: must not wrap into a future epoch. */
+	ASSERT_TRUE(!parse_str("line=MK 45m|12345678901").has_line);
+	ASSERT_TRUE(!parse_str("line=MK 45m|4294967296").has_line);
+	/* uint32 max itself is fine. */
+	settings_msg_t m = parse_str("line=MK 45m|4294967295");
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_INT(4294967295LL, (long long)m.line_expiry);
+	/* A malformed line must not damage a well-formed neighbour. */
+	m = parse_str("line=MK 45m|abc;glance=0");
+	ASSERT_TRUE(!m.has_line);
+	ASSERT_TRUE(m.has_glance);
+}
+
+static void test_line_splits_on_last_pipe(void)
+{
+	/* PKJS strips '|' from the text, but if one ever slipped through the
+	 * LAST pipe still separates text from expiry. */
+	settings_msg_t m = parse_str("line=A|B 5m|123");
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_STR("A|B 5m", m.line_text);
+	ASSERT_EQ_INT(123, (long long)m.line_expiry);
+}
+
+static void test_line_oversize_rejected(void)
+{
+	/* Text at SETTINGS_LINE_MAX-1 bytes fits; one more is malformed
+	 * (rejected whole, not truncated mid-UTF-8). */
+	char buf[160];
+	char text[SETTINGS_LINE_MAX + 2];
+	memset(text, 'A', sizeof(text));
+
+	text[SETTINGS_LINE_MAX - 1] = '\0';   /* 79 bytes of text */
+	snprintf(buf, sizeof(buf), "line=%s|42", text);
+	settings_msg_t m = parse_str(buf);
+	ASSERT_TRUE(m.has_line);
+	ASSERT_EQ_STR(text, m.line_text);
+
+	memset(text, 'A', sizeof(text));
+	text[SETTINGS_LINE_MAX] = '\0';       /* 80 bytes — one over */
+	snprintf(buf, sizeof(buf), "line=%s|42", text);
+	ASSERT_TRUE(!parse_str(buf).has_line);
+}
+
+static void test_line_key_must_match_exactly(void)
+{
+	ASSERT_TRUE(!parse_str("lines=MK 45m|42").has_line);
+	ASSERT_TRUE(!parse_str("lin=MK 45m|42").has_line);
+}
+
 int main(void)
 {
 	RUN_TEST(test_glance_on);
@@ -102,5 +196,13 @@ int main(void)
 	RUN_TEST(test_unknown_keys_ignored);
 	RUN_TEST(test_malformed_segments_dont_break_good_ones);
 	RUN_TEST(test_len_bounds_respected);
+	RUN_TEST(test_line_valid);
+	RUN_TEST(test_line_alone);
+	RUN_TEST(test_line_missing);
+	RUN_TEST(test_line_empty_text_clears);
+	RUN_TEST(test_line_malformed_expiry);
+	RUN_TEST(test_line_splits_on_last_pipe);
+	RUN_TEST(test_line_oversize_rejected);
+	RUN_TEST(test_line_key_must_match_exactly);
 	return unit_summary();
 }

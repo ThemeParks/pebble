@@ -29,6 +29,8 @@ var filterLiveData = lib.filterLiveData;
 var parseSettings = lib.parseSettings;
 var encodeSettingsPayload = lib.encodeSettingsPayload;
 var buildConfigPage = lib.buildConfigPage;
+var shortestOperatingWait = lib.shortestOperatingWait;
+var buildGlanceLine = lib.buildGlanceLine;
 
 function msgVal(payload, name) {
   if (payload[name] !== undefined) return payload[name];
@@ -84,11 +86,10 @@ function saveSettings(settings) {
   }
 }
 
-// Push the compact settings payload (see lib.encodeSettingsPayload) to
-// the watch. It's a tiny single message — plain send with a couple of
+// Send a settings wire payload (see lib.encodeSettingsPayload) to the
+// watch. It's a tiny single message — plain send with a couple of
 // retries, no chunking needed.
-function pushSettingsToWatch(settings) {
-  var payload = encodeSettingsPayload(settings);
+function sendSettingsPayload(payload) {
   function attempt(retriesLeft) {
     var msg = {};
     msg.SETTINGS_DATA = payload;
@@ -107,25 +108,64 @@ function pushSettingsToWatch(settings) {
   attempt(2);
 }
 
-function openConfigPage(settings, dests) {
-  var html = buildConfigPage(settings, dests, IS_UBER);
+// Push the settings payload, with the packed My Parks glance line
+// appended when the user has selected parks (see buildMyParksLine). No
+// selection pushes an explicit empty line segment, which clears any
+// line the watch still has persisted from an earlier selection.
+function pushSettingsToWatch(settings) {
+  var myParks = settings.myParks || [];
+  if (myParks.length === 0) {
+    sendSettingsPayload(lib.encodeSettingsPayload(settings, "", 0));
+    return;
+  }
+  buildMyParksLine(myParks).then(function (line) {
+    // Expiry: the glance must never outlive the data's 30-minute
+    // freshness window. Seconds — the watch compares against time(NULL).
+    var expiry = line ? Math.floor(Date.now() / 1000) + GLANCE_LINE_TTL_SECS : 0;
+    sendSettingsPayload(lib.encodeSettingsPayload(settings, line, expiry));
+  });
+}
+
+function openConfigPage(settings, dests, parks) {
+  var html = buildConfigPage(settings, dests, IS_UBER, parks);
   Pebble.openURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+}
+
+// The build's own parks ({id, name}) for the per-destination config
+// page's My Parks section: the API destination's park list filtered to
+// the parks this build actually ships (the destination may carry water
+// parks etc. that the watch app doesn't).
+function ownParksFrom(dests) {
+  var out = [];
+  for (var i = 0; i < dests.length; i++) {
+    if (dests[i].id !== DESTINATION_ID) continue;
+    var parks = dests[i].parks || [];
+    for (var p = 0; p < parks.length; p++) {
+      for (var k = 0; k < ALL_PARK_IDS.length; k++) {
+        if (parks[p].id === ALL_PARK_IDS[k]) {
+          out.push({ id: parks[p].id, name: parks[p].name });
+          break;
+        }
+      }
+    }
+    break;
+  }
+  return out;
 }
 
 Pebble.addEventListener("showConfiguration", function () {
   var settings = loadSettings();
-  if (!IS_UBER) {
-    openConfigPage(settings, []);
-    return;
-  }
-  // Uber build: the destination dropdown needs the dest list (cached
-  // 24h). On failure open with an empty list — the page disables the
-  // fixed-destination option and shows a hint instead of never opening.
+  // Both builds want the dest list (cached 24h) now: the uber build for
+  // the destination dropdown + the My Parks grouping, per-destination
+  // builds for their own parks' display names in the My Parks section.
+  // On failure the page still opens with those sections degraded to
+  // hints instead of never opening.
   fetchDestList().then(function (dests) {
-    openConfigPage(settings, dests);
+    if (IS_UBER) openConfigPage(settings, dests, []);
+    else openConfigPage(settings, [], ownParksFrom(dests));
   }).catch(function (err) {
     console.log("PKJS: config dest list failed: " + err.message);
-    openConfigPage(settings, []);
+    openConfigPage(settings, [], []);
   });
 });
 
@@ -428,6 +468,139 @@ function saveCache(parkId, data) {
   } catch (err) {
     console.log("PKJS: cache save failed - " + err.message);
   }
+  // Every fresh fetch also refreshes the per-park wait snapshot the
+  // My Parks glance line is composed from.
+  recordWaitSnapshot(parkId, data, entry.timestamp);
+}
+
+// ── My Parks glance line ─────────────────────────────────────────────────
+//
+// The launcher glance can show a packed multi-park wait line ("MK 45m ·
+// EP 30m") for the parks picked on the config page. The watch only ever
+// holds one park's live data, so PKJS composes the line and appends it
+// to the settings payload (";line=<text>|<expiry>") after every park
+// serve and on every settings push. tpw_waits keeps the latest
+// {name, wait, ts} snapshot per park id, refreshed on every cache save.
+
+var WAITS_KEY = "tpw_waits";
+var GLANCE_LINE_TTL_SECS = 30 * 60;
+
+function loadWaits() {
+  try {
+    var raw = localStorage.getItem(WAITS_KEY);
+    if (raw) {
+      var p = JSON.parse(raw);
+      if (p && typeof p === "object") return p;
+    }
+  } catch (e) {}
+  return {};
+}
+
+// Park display name from the cached dest list — synchronous (no fetch);
+// null while the cache hasn't been populated yet. Callers that need a
+// name go through fetchDestList() first, which fills the cache.
+function parkNameFor(parkId) {
+  try {
+    var raw = localStorage.getItem(DEST_CACHE_KEY);
+    if (!raw) return null;
+    var cached = JSON.parse(raw);
+    var dests = cached && cached.data;
+    if (!dests) return null;
+    for (var d = 0; d < dests.length; d++) {
+      var parks = dests[d].parks || [];
+      for (var p = 0; p < parks.length; p++) {
+        if (parks[p].id === parkId) return parks[p].name;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Record {name, shortestOperatingWait, ts} for a park. ts defaults to
+// now; the warm-from-cache path passes the cache entry's timestamp so a
+// stale cache can't masquerade as a fresh wait.
+function recordWaitSnapshot(parkId, data, tsOpt) {
+  var w = loadWaits();
+  w[parkId] = {
+    name: parkNameFor(parkId),
+    wait: shortestOperatingWait((data && data.a) || []),
+    ts: tsOpt == null ? Date.now() : tsOpt,
+  };
+  try { localStorage.setItem(WAITS_KEY, JSON.stringify(w)); } catch (e) {}
+}
+
+// Make sure each selected park has a fresh-enough wait snapshot: parks
+// whose phone cache is still fresh are snapshotted from it, the rest
+// get a real fetch through the normal fetchAndFilter/cache path (max
+// MYPARKS_MAX = 4 requests; the fetches populate the same cache the
+// watch is served from). Fetch failures fall back to the stale cache —
+// buildGlanceLine's 30-minute age filter decides whether that's still
+// showable. Always resolves.
+function ensureMyParkWaits(parkIds) {
+  var jobs = [];
+  for (var i = 0; i < parkIds.length && i < lib.MYPARKS_MAX; i++) {
+    (function (id) {
+      var cached = loadCache(id);
+      if (shouldServeCache(cached, Date.now(), STALE_THRESHOLD_MS, false)) {
+        var w = loadWaits();
+        // Cache is fresh but may predate this feature (or this session's
+        // dest-list fetch, for the name) — refresh the snapshot from it.
+        if (!w[id] || w[id].ts !== cached.timestamp || !w[id].name) {
+          recordWaitSnapshot(id, cached.data, cached.timestamp);
+        }
+        return;
+      }
+      jobs.push(fetchAndFilter(id).then(function (data) {
+        saveCache(id, data);
+      }).catch(function (err) {
+        console.log("PKJS: my-parks fetch failed for " + id + " - " + err.message);
+        if (cached) recordWaitSnapshot(id, cached.data, cached.timestamp);
+      }));
+    })(parkIds[i]);
+  }
+  return Promise.all(jobs);
+}
+
+// Compose the packed line for the selected parks. Resolves to "" when
+// nothing is usable (offline, all waits stale/unknown) — the caller
+// then pushes an empty line, clearing the watch's stored one so it
+// falls back to its locally-composed glance. Never rejects.
+function buildMyParksLine(parkIds) {
+  // The dest list provides display names (cached 24h) — fetch it first
+  // so parkNameFor can resolve codes even on a cold start.
+  return fetchDestList().catch(function () {
+    return [];
+  }).then(function () {
+    return ensureMyParkWaits(parkIds);
+  }).then(function () {
+    var now = Date.now();
+    var w = loadWaits();
+    var entries = [];
+    for (var i = 0; i < parkIds.length; i++) {
+      var s = w[parkIds[i]];
+      if (!s) continue;
+      entries.push({
+        name: s.name || parkNameFor(parkIds[i]),
+        wait: s.wait,
+        ageMs: now - s.ts,
+      });
+    }
+    var line = buildGlanceLine(entries, now);
+    console.log('PKJS: my-parks line "' + line + '"');
+    return line;
+  }).catch(function (err) {
+    console.log("PKJS: my-parks line failed - " + err.message);
+    return "";
+  });
+}
+
+// After a park serve: if My Parks is configured, refresh the packed
+// line on the watch. One tiny push per serve event.
+function maybePushGlanceLine() {
+  var settings = loadSettings();
+  if (settings.myParks && settings.myParks.length > 0) {
+    pushSettingsToWatch(settings);
+  }
 }
 
 Pebble.addEventListener("ready", function () {
@@ -577,7 +750,13 @@ function sendParkData(data) {
   var payload = encodeParkData(data);
   console.log("PKJS: sending " + utf8Len(payload) + " bytes");
   sendChunked("PARK_DATA_JSON", payload,
-    function () { console.log("PKJS: sent ok"); },
+    function () {
+      console.log("PKJS: sent ok");
+      // Refresh the packed My Parks glance line after every serve —
+      // the serve proves the watch is listening, and the just-fetched
+      // park is usually one of the selected ones.
+      maybePushGlanceLine();
+    },
     function (e) {
       console.log("PKJS: send failed");
       if (e) {

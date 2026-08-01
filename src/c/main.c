@@ -592,10 +592,13 @@ static void prime_glance(AppGlanceReloadSession *session,
 /* Build the glance slice queue for the last-viewed park and hand it to
  * the launcher. Called from deinit(), i.e. every app exit. Queue order
  * (earlier = shown first, launcher advances as each expires):
- *   1. headline wait            (expires now+30m)
- *   2. "opens in ..." countdown (pre-open only; expires at open)
- *   3. "closes in ..." countdown (expires at close)
- *   4+. upcoming days "Wed · 9 AM - 10 PM" (each expires at its close)
+ *   1. the phone-composed My Parks line ("MK 45m · EP 30m", expires at
+ *      its pushed expiry) — when present and unexpired it REPLACES the
+ *      locally-composed single-park wait rung below
+ *   2. headline wait            (expires now+30m; skipped when 1 ran)
+ *   3. "opens in ..." countdown (pre-open only; expires at open)
+ *   4. "closes in ..." countdown (expires at close)
+ *   5+. upcoming days "Wed · 9 AM - 10 PM" (each expires at its close)
  */
 static void publish_glance(void)
 {
@@ -618,6 +621,29 @@ static void publish_glance(void)
 	char today[DATE_STR_LEN];
 	strftime(today, sizeof(today), "%Y-%m-%d", &lt);
 
+	/* My Parks line (pushed by PKJS, persisted via SETTINGS_DATA): while
+	 * its expiry is still ahead it is the first slice, replacing the
+	 * locally-composed single-park wait rung — it carries the same class
+	 * of data (fresh waits) for the parks the user actually asked for.
+	 * It deliberately sits OUTSIDE the idx guard: the uber build's
+	 * picker exits (no current park) can still show it. Expired/absent
+	 * lines leave everything exactly as before. */
+	bool line_used = false;
+	{
+		char line[GLANCE_LINE_MAX];
+		uint32_t line_exp = 0;
+		if (storage_get_glance_line(line, &line_exp)
+		    && (time_t)line_exp > now) {
+			/* The line is plain text (no '{' template syntax) well under
+			 * GLANCE_SLICE_LEN, so a straight copy is safe. */
+			snprintf(s_glance_text[s_glance_count], GLANCE_SLICE_LEN,
+			         "%s", line);
+			s_glance_expiry[s_glance_count] = (time_t)line_exp;
+			s_glance_count++;
+			line_used = true;
+		}
+	}
+
 	int idx = s_current_park;
 #ifndef MULTI_DESTINATION
 	/* Exited from a picker (s_current_park == -1): fall back to the
@@ -639,10 +665,11 @@ static void publish_glance(void)
 		const char *park_name = g_parks[idx].name;
 		bool use_24h = clock_is_24h_style();
 
-		/* Headline wait first: only from live data for this park, only
-		 * fresh enough that the launcher won't show a fossil. When it
-		 * expires (30 min) the launcher advances to the countdowns. */
-		if (idx == s_current_park && g_park.last_updated_secs != 0
+		/* Headline wait: only from live data for this park, only fresh
+		 * enough that the launcher won't show a fossil. When it expires
+		 * (30 min) the launcher advances to the countdowns. Skipped when
+		 * the My Parks line took this rung's slot above. */
+		if (!line_used && idx == s_current_park && g_park.last_updated_secs != 0
 		    && now >= (time_t)g_park.last_updated_secs) {
 			uint32_t age = (uint32_t)now - g_park.last_updated_secs;
 			const attraction_t *a = (age < GLANCE_WAIT_MAX_AGE_SECS)

@@ -29,6 +29,39 @@ static void parse_segment(const char *seg, uint16_t seg_len,
 			out->glance = val[0] == '1';
 		}
 	}
+
+	if (eq == 4 && strncmp(seg, "line", 4) == 0) {
+		/* "<text>|<expiryEpochSecs>", split on the LAST '|' (the text
+		 * itself is guaranteed pipe-free by PKJS, but a last-split makes
+		 * even a violated guarantee parse the expiry correctly — see
+		 * settings_parse.h). Empty text is the explicit clear. */
+		int last = -1;
+		for (uint16_t i = 0; i < val_len; i++) {
+			if (val[i] == '|') last = (int)i;
+		}
+		if (last < 0) return;              /* no expiry — malformed */
+
+		const char *exp = val + last + 1;
+		uint16_t exp_len = (uint16_t)(val_len - last - 1);
+		/* Expiry: 1..10 digits, must fit uint32 — a garbled value must
+		 * not wrap into a random future epoch. */
+		if (exp_len == 0 || exp_len > 10) return;
+		uint64_t expiry = 0;
+		for (uint16_t d = 0; d < exp_len; d++) {
+			if (exp[d] < '0' || exp[d] > '9') return;
+			expiry = expiry * 10 + (uint64_t)(exp[d] - '0');
+		}
+		if (expiry > 0xffffffffu) return;
+
+		uint16_t text_len = (uint16_t)last;
+		/* Oversize text can't be ours (PKJS caps well under this) —
+		 * reject rather than truncate mid-UTF-8. */
+		if (text_len > SETTINGS_LINE_MAX - 1) return;
+		memcpy(out->line_text, val, text_len);
+		out->line_text[text_len] = '\0';
+		out->line_expiry = (uint32_t)expiry;
+		out->has_line = true;
+	}
 	/* Unknown keys: ignored (forward compatibility). */
 }
 

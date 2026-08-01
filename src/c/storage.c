@@ -5,7 +5,11 @@
  *   1                  : sort_mode (uint32)
  *   2                  : last_park (string, park UUID)
  *   3                  : glance_enabled (int 0/1; absent = enabled)
+ *   4                  : glance_line (string, packed My Parks line)
+ *   5                  : glance_line_expiry (uint32 epoch secs)
+ *   200                : last_dest (string, uber build only)
  *   1000 + parkSlot*2 + listKind : favourites array (MAX_FAVS_PER_LIST * FAV_ID_LEN bytes)
+ *   2000 + parkSlot    : park hours ("open|close" string)
  *
  * parkSlot is the park's index in g_parks (0..3). We avoid hashing the
  * UUID — a fixed slot per known park is plenty.
@@ -18,6 +22,8 @@
 #define KEY_SORT_MODE 1
 #define KEY_LAST_PARK 2
 #define KEY_GLANCE_ENABLED 3
+#define KEY_GLANCE_LINE 4
+#define KEY_GLANCE_LINE_EXPIRY 5
 #define KEY_FAV_BASE 1000
 /* Hours stored as "open|close" in one persist slot per park. */
 #define KEY_HOURS_BASE 2000
@@ -97,12 +103,24 @@ static int fav_key(int slot, fav_list_kind_t list_kind)
  * cache mostly spares repeat reads within one exit. */
 static int8_t s_glance_cache = -1;
 
+/* Glance line cache — same tri-state pattern as the hours cache:
+ * "missing" is cached too, so an unset line costs one persist probe. */
+typedef enum {
+	LINE_UNKNOWN = 0,   /* not asked persist yet */
+	LINE_MISSING,       /* asked; nothing stored */
+	LINE_CACHED,        /* buffers below are valid */
+} line_state_t;
+static uint8_t s_line_state = LINE_UNKNOWN;
+static char s_line_buf[GLANCE_LINE_MAX];
+static uint32_t s_line_expiry;
+
 void storage_init(void)
 {
 	/* Statics are zeroed on every real launch; the unit-test binaries
 	 * run many cases in one process, so reset_all() calls this to re-arm
 	 * the lazy caches as if freshly launched. */
 	s_glance_cache = -1;
+	s_line_state = LINE_UNKNOWN;
 }
 
 bool storage_get_glance_enabled(void)
@@ -122,6 +140,49 @@ void storage_set_glance_enabled(bool enabled)
 {
 	persist_write_int(KEY_GLANCE_ENABLED, enabled ? 1 : 0);
 	s_glance_cache = enabled ? 1 : 0;
+}
+
+bool storage_get_glance_line(char out[GLANCE_LINE_MAX], uint32_t *expiry_out)
+{
+	if (s_line_state == LINE_UNKNOWN) {
+		s_line_state = LINE_MISSING;
+		if (persist_exists(KEY_GLANCE_LINE)
+		    && persist_read_string(KEY_GLANCE_LINE, s_line_buf,
+		                           sizeof(s_line_buf)) > 0
+		    && s_line_buf[0] != '\0') {
+			/* Expiry rides in its own slot; a missing one reads as 0 —
+			 * i.e. already expired, which publish_glance ignores. Safer
+			 * than inventing a future expiry for half-written state. */
+			s_line_expiry = persist_exists(KEY_GLANCE_LINE_EXPIRY)
+				? (uint32_t)persist_read_int(KEY_GLANCE_LINE_EXPIRY) : 0;
+			s_line_state = LINE_CACHED;
+		}
+	}
+	if (s_line_state != LINE_CACHED) return false;
+	strncpy(out, s_line_buf, GLANCE_LINE_MAX - 1);
+	out[GLANCE_LINE_MAX - 1] = '\0';
+	if (expiry_out) *expiry_out = s_line_expiry;
+	return true;
+}
+
+void storage_set_glance_line(const char *text, uint32_t expiry)
+{
+	if (!text || !text[0]) {
+		/* Empty set is the explicit clear (user deselected all parks,
+		 * or PKJS had nothing usable) — drop persist AND cache so the
+		 * local single-park glance takes over immediately. */
+		persist_delete(KEY_GLANCE_LINE);
+		persist_delete(KEY_GLANCE_LINE_EXPIRY);
+		s_line_state = LINE_MISSING;
+		return;
+	}
+	persist_write_string(KEY_GLANCE_LINE, text);
+	persist_write_int(KEY_GLANCE_LINE_EXPIRY, (int)expiry);
+	/* Write through to the RAM cache. */
+	strncpy(s_line_buf, text, sizeof(s_line_buf) - 1);
+	s_line_buf[sizeof(s_line_buf) - 1] = '\0';
+	s_line_expiry = expiry;
+	s_line_state = LINE_CACHED;
 }
 
 sort_mode_t storage_get_sort_mode(void)
