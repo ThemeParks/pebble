@@ -64,7 +64,6 @@ jobs:
         run: docker exec pebble-ci python3 scripts/warmup_emulator.py --dest wdw emery gabbro
 
       - name: Integration tests (wdw)
-        continue-on-error: true
         run: docker exec pebble-ci python3 scripts/integration_tests.py -v
 
       - name: Reset emulator for wdw emery screenshots
@@ -87,7 +86,6 @@ jobs:
         run: docker exec pebble-ci bash -c 'pkill -9 -f "[q]emu-pebble" || true; pkill -9 -f "[p]ypkjs" || true; rm -f /tmp/pb-emulator.json; rm -f /root/.pebble-sdk/4.9.148/emery/qemu_spi_flash.bin; rm -f /root/.pebble-sdk/4.9.148/gabbro/qemu_spi_flash.bin; sleep 2'
 
       - name: Integration tests (uber)
-        continue-on-error: true
         run: docker exec pebble-ci python3 scripts/integration_tests.py --dest all -v
 
       - name: Reset emulator for uber emery screenshots
