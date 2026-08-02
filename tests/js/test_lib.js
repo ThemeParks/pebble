@@ -1123,11 +1123,12 @@ test("buildHoursPin shape (Orlando -04:00)", function () {
     time: "2026-08-01T13:00:00Z",          // UTC, not the -04:00 wall clock
     duration: 780,                          // 13 hours
     layout: {
-      // calendarPin: the timeline list shows the full range, not just
-      // the start time (device feedback on genericPin).
-      type: "calendarPin",
+      // genericPin + subtitle range: the emulator-render-tested layout
+      // (calendarPin hides the range; title-range truncates).
+      type: "genericPin",
       title: "Magic Kingdom",
-      body: "Open 09:00 - 22:00",           // park-local wall clock
+      subtitle: "09:00 - 22:00",            // park-local wall clock
+      body: "Park hours",
       tinyIcon: "system://images/TIMELINE_CALENDAR",
     },
     actions: [{ title: "Open App", type: "openWatchApp", launchCode: 0 }],
