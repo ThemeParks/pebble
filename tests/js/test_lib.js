@@ -306,6 +306,22 @@ test("getUpcomingSchedule keeps a still-open overnight session", function () {
   ]);
 });
 
+test("getUpcomingScheduleIso keeps raw ISO strings", function () {
+  // Same selection as getUpcomingSchedule but with the offset-bearing
+  // ISO strings intact — timeline pins are built from these.
+  var nowMs = new Date("2026-07-29T12:00:00-04:00").getTime();
+  var got = lib.getUpcomingScheduleIso(UPCOMING_SCHED, 2, nowMs);
+  assert.deepStrictEqual(got, [
+    { date: "2026-07-29",
+      openIso: "2026-07-29T09:00:00-04:00",
+      closeIso: "2026-07-29T22:00:00-04:00" },
+    { date: "2026-07-30",
+      openIso: "2026-07-30T09:00:00-04:00",
+      closeIso: "2026-07-30T22:00:00-04:00" },
+  ]);
+  assert.deepStrictEqual(lib.getUpcomingScheduleIso([], 7, 0), []);
+});
+
 test("getUpcomingSchedule empty when nothing upcoming", function () {
   var nowMs = new Date("2026-08-02T12:00:00Z").getTime();
   assert.deepStrictEqual(
@@ -485,7 +501,8 @@ test("filterLiveData shows keep only future times, max 4", function () {
 
 test("defaultSettings shape", function () {
   assert.deepStrictEqual(lib.defaultSettings(),
-    { v: 1, glance: true, destMode: "watch", destId: null, myParks: [] });
+    { v: 1, glance: true, destMode: "watch", destId: null, myParks: [],
+      pins: false });
 });
 
 test("parseSettings garbage yields defaults", function () {
@@ -501,14 +518,28 @@ test("parseSettings garbage yields defaults", function () {
 
 test("parseSettings full round-trip", function () {
   var s = { v: 1, glance: false, destMode: "fixed", destId: "dest-wdw",
-            myParks: ["park-a", "park-b"] };
+            myParks: ["park-a", "park-b"], pins: true };
   assert.deepStrictEqual(lib.parseSettings(JSON.stringify(s)), s);
 });
 
 test("parseSettings partials get defaults", function () {
   var got = lib.parseSettings('{"glance":false}');
   assert.deepStrictEqual(got,
-    { v: 1, glance: false, destMode: "watch", destId: null, myParks: [] });
+    { v: 1, glance: false, destMode: "watch", destId: null, myParks: [],
+      pins: false });
+});
+
+test("parseSettings pins defaults false and stays opt-in", function () {
+  // Absent → false (the owner requirement: never opted in by accident).
+  assert.strictEqual(lib.parseSettings(null).pins, false);
+  assert.strictEqual(lib.parseSettings("{}").pins, false);
+  // Explicit booleans round-trip.
+  assert.strictEqual(lib.parseSettings('{"pins":true}').pins, true);
+  assert.strictEqual(lib.parseSettings('{"pins":false}').pins, false);
+  // Anything mistyped degrades to OFF, never on.
+  assert.strictEqual(lib.parseSettings('{"pins":"true"}').pins, false);
+  assert.strictEqual(lib.parseSettings('{"pins":1}').pins, false);
+  assert.strictEqual(lib.parseSettings('{"pins":{}}').pins, false);
 });
 
 test("parseSettings mistyped fields fall back", function () {
@@ -864,6 +895,30 @@ test("buildConfigPage is self-contained", function () {
   assert.ok(html.indexOf("pebblejs://close") >= 0, "cancel URL present");
 });
 
+test("buildConfigPage timeline toggle present and OFF by default", function () {
+  // Both build flavours carry the Timeline card; the checkbox is
+  // UNCHECKED unless settings.pins is true (opt-in requirement).
+  var uber = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
+  var perDest = lib.buildConfigPage(lib.defaultSettings(), [], false);
+  [uber, perDest].forEach(function (html) {
+    assert.ok(html.indexOf('id="pins"') >= 0, "pins checkbox present");
+    assert.ok(html.indexOf('id="pins" checked') === -1, "unchecked by default");
+    assert.ok(html.indexOf("Timeline") >= 0, "card heading");
+    assert.ok(html.indexOf("Rebble timeline service") >= 0,
+              "hint mentions the Rebble timeline service");
+  });
+});
+
+test("buildConfigPage timeline toggle prefills and saves", function () {
+  var s = lib.defaultSettings();
+  s.pins = true;
+  var html = lib.buildConfigPage(s, CONFIG_DESTS, true);
+  assert.ok(html.indexOf('id="pins" checked') >= 0, "prefilled checked");
+  // The save handler must round-trip the checkbox into s.pins.
+  assert.ok(html.indexOf("s.pins=document.getElementById('pins').checked") >= 0,
+            "save JS includes s.pins");
+});
+
 test("buildConfigPage My Parks has filter, chips line and search keys", function () {
   var html = lib.buildConfigPage(lib.defaultSettings(), CONFIG_DESTS, true);
   assert.ok(html.indexOf('id="mpfilter"') >= 0, "parks filter input");
@@ -1033,6 +1088,188 @@ test("buildFavsStore tolerates garbage prev and parsed", function () {
   // Missing lists on parsed degrade to empty arrays.
   var s = lib.buildFavsStore(null, { parkId: "p3" }, 7);
   assert.deepStrictEqual(s.p3, { a: [], h: [], ts: 7 });
+});
+
+// ── Timeline pins ────────────────────────────────────────────────────────
+//
+// Pin times MUST be UTC ISO: the park API's strings carry the park's
+// offset, and reusing the zone-less wire "HH:MM" would pin Tokyo's
+// parade to the user's local clock. Both hemispheres of the conversion
+// are pinned here (Orlando -04:00, Tokyo +09:00).
+
+var MK_UUID = "75ea578a-adc8-4116-a54d-dccb60765ef9";   // shortId 60765ef9
+
+test("isoToUtcIso converts offsets to UTC", function () {
+  // Orlando summer: UTC-4.
+  assert.strictEqual(lib.isoToUtcIso("2026-08-01T09:00:00-04:00"),
+                     "2026-08-01T13:00:00Z");
+  // Tokyo: UTC+9 — crosses the date line backwards.
+  assert.strictEqual(lib.isoToUtcIso("2026-08-02T08:30:00+09:00"),
+                     "2026-08-01T23:30:00Z");
+  // Already-UTC passes through, milliseconds stripped.
+  assert.strictEqual(lib.isoToUtcIso("2026-08-01T13:00:00Z"),
+                     "2026-08-01T13:00:00Z");
+  assert.strictEqual(lib.isoToUtcIso("garbage"), null);
+  assert.strictEqual(lib.isoToUtcIso(""), null);
+  assert.strictEqual(lib.isoToUtcIso(null), null);
+});
+
+test("buildHoursPin shape (Orlando -04:00)", function () {
+  var pin = lib.buildHoursPin(MK_UUID, "Magic Kingdom",
+                              "2026-08-01T09:00:00-04:00",
+                              "2026-08-01T22:00:00-04:00");
+  assert.deepStrictEqual(pin, {
+    id: "tpw-hours-60765ef9-2026-08-01",
+    time: "2026-08-01T13:00:00Z",          // UTC, not the -04:00 wall clock
+    duration: 780,                          // 13 hours
+    layout: {
+      type: "genericPin",
+      title: "Magic Kingdom hours",
+      body: "Open 09:00 - 22:00",           // park-local wall clock
+      tinyIcon: "system://images/TIMELINE_CALENDAR",
+    },
+  });
+  assert.ok(pin.id.length <= 64, "id within the API's 64-char cap");
+});
+
+test("buildHoursPin Tokyo +09:00 keeps the park-local id date", function () {
+  var pin = lib.buildHoursPin("aaaaaaaa-bbbb-cccc-dddd-eeee12345678",
+                              "Tokyo DisneySea",
+                              "2026-08-02T08:30:00+09:00",
+                              "2026-08-02T21:00:00+09:00");
+  // UTC time rolls back to Aug 1…
+  assert.strictEqual(pin.time, "2026-08-01T23:30:00Z");
+  // …but the id keeps the PARK'S Aug 2, so the same session is always
+  // the same pin whatever the phone's zone.
+  assert.strictEqual(pin.id, "tpw-hours-12345678-2026-08-02");
+  assert.strictEqual(pin.duration, 750);
+});
+
+test("buildHoursPin duration caps at 24h and never goes negative", function () {
+  // 25-hour "session" (bad data) caps at 1440.
+  var long = lib.buildHoursPin(MK_UUID, "MK",
+                               "2026-08-01T09:00:00-04:00",
+                               "2026-08-02T10:00:00-04:00");
+  assert.strictEqual(long.duration, 1440);
+  // close before open → no duration property at all.
+  var neg = lib.buildHoursPin(MK_UUID, "MK",
+                              "2026-08-01T09:00:00-04:00",
+                              "2026-08-01T08:00:00-04:00");
+  assert.strictEqual(neg.duration, undefined);
+  // Unparseable close → pin still valid, no duration.
+  var noClose = lib.buildHoursPin(MK_UUID, "MK",
+                                  "2026-08-01T09:00:00-04:00", "junk");
+  assert.strictEqual(noClose.duration, undefined);
+  assert.strictEqual(noClose.time, "2026-08-01T13:00:00Z");
+});
+
+test("buildHoursPin is idempotent and null on garbage", function () {
+  var a = lib.buildHoursPin(MK_UUID, "MK", "2026-08-01T09:00:00-04:00",
+                            "2026-08-01T22:00:00-04:00");
+  var b = lib.buildHoursPin(MK_UUID, "MK", "2026-08-01T09:00:00-04:00",
+                            "2026-08-01T22:00:00-04:00");
+  assert.deepStrictEqual(a, b);   // same inputs → byte-identical pin
+  assert.strictEqual(lib.buildHoursPin(MK_UUID, "MK", "junk", "junk"), null);
+  assert.strictEqual(lib.buildHoursPin(MK_UUID, "MK", null, null), null);
+  assert.strictEqual(
+    lib.buildHoursPin(null, "MK", "2026-08-01T09:00:00-04:00",
+                      "2026-08-01T22:00:00-04:00"), null);
+});
+
+test("buildShowPin shape and UTC conversion", function () {
+  var showId = "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0004";
+  var start = "2026-08-01T21:30:00-04:00";
+  var pin = lib.buildShowPin(showId, "Fantasmic!", "Hollywood Studios", start);
+  assert.strictEqual(pin.time, "2026-08-02T01:30:00Z");
+  assert.strictEqual(pin.id,
+    "tpw-show-ffff0004-" + Math.floor(Date.parse(start) / 60000));
+  assert.ok(/^tpw-show-ffff0004-\d+$/.test(pin.id), "id shape");
+  assert.ok(pin.id.length <= 64, "id within the API's 64-char cap");
+  assert.deepStrictEqual(pin.layout, {
+    type: "genericPin",
+    title: "Fantasmic!",
+    body: "Hollywood Studios",
+    tinyIcon: "system://images/SCHEDULED_EVENT",
+  });
+  // Same showtime → same id (idempotent); different showtime → new id.
+  assert.deepStrictEqual(
+    lib.buildShowPin(showId, "Fantasmic!", "Hollywood Studios", start), pin);
+  var later = lib.buildShowPin(showId, "Fantasmic!", "Hollywood Studios",
+                               "2026-08-01T22:30:00-04:00");
+  assert.notStrictEqual(later.id, pin.id);
+});
+
+test("buildShowPin null on garbage", function () {
+  assert.strictEqual(lib.buildShowPin("id", "X", "P", "junk"), null);
+  assert.strictEqual(lib.buildShowPin("id", "X", "P", null), null);
+  assert.strictEqual(
+    lib.buildShowPin(null, "X", "P", "2026-08-01T21:30:00-04:00"), null);
+});
+
+// Raw API-shaped live data for selectShowPins: full ids, ISO showtimes.
+var PIN_LIVE = [
+  { entityType: "SHOW", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff1111",
+    name: "Parade", status: "OPERATING",
+    showtimes: [
+      { startTime: "2026-08-01T15:00:00-04:00" },   // past
+      { startTime: "2026-08-01T20:00:00-04:00" },
+      { startTime: "2026-08-01T23:00:00-04:00" },
+    ] },
+  { entityType: "SHOW", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff2222",
+    name: "Fireworks", status: "OPERATING",
+    showtimes: [
+      { startTime: "2026-08-01T21:00:00-04:00" },
+      { startTime: "2026-08-01T22:00:00-04:00" },
+    ] },
+  { entityType: "SHOW", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff3333",
+    name: "Unloved Show", status: "OPERATING",
+    showtimes: [{ startTime: "2026-08-01T20:30:00-04:00" }] },  // not favourited
+  { entityType: "ATTRACTION", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeffff1111",
+    name: "Same-shortid Ride", status: "OPERATING" },           // not a SHOW
+];
+var PIN_FAVS = ["ffff1111", "ffff2222"];
+var PIN_NOW = new Date("2026-08-01T19:00:00-04:00").getTime();
+
+test("selectShowPins picks next future favourited showtimes in order", function () {
+  var got = lib.selectShowPins(PIN_LIVE, PIN_FAVS, PIN_NOW, 3);
+  // 20:00 Parade, 21:00 Fireworks, 22:00 Fireworks — interleaved across
+  // shows, sorted by start; the 15:00 (past), the unfavourited show and
+  // the 23:00 (over cap) all excluded.
+  assert.strictEqual(got.length, 3);
+  assert.strictEqual(got[0].name, "Parade");
+  assert.strictEqual(got[0].startTime, "2026-08-01T20:00:00-04:00");
+  assert.strictEqual(got[1].name, "Fireworks");
+  assert.strictEqual(got[1].startTime, "2026-08-01T21:00:00-04:00");
+  assert.strictEqual(got[2].name, "Fireworks");
+  assert.strictEqual(got[2].startTime, "2026-08-01T22:00:00-04:00");
+  // Full ids survive (pin ids need them).
+  assert.strictEqual(got[0].id, "aaaaaaaa-bbbb-cccc-dddd-eeeeffff1111");
+  // startMs is the parsed instant, usable for expiry bookkeeping.
+  assert.strictEqual(got[0].startMs, Date.parse(got[0].startTime));
+});
+
+test("selectShowPins cap, defaults and degenerate inputs", function () {
+  // max=2 trims; the default cap is SHOW_PINS_MAX (3).
+  assert.strictEqual(lib.selectShowPins(PIN_LIVE, PIN_FAVS, PIN_NOW, 2).length, 2);
+  assert.strictEqual(lib.SHOW_PINS_MAX, 3);
+  assert.strictEqual(lib.selectShowPins(PIN_LIVE, PIN_FAVS, PIN_NOW).length, 3);
+  // No favourites, empty/absent live data → empty, never a throw.
+  assert.deepStrictEqual(lib.selectShowPins(PIN_LIVE, [], PIN_NOW, 3), []);
+  assert.deepStrictEqual(lib.selectShowPins([], PIN_FAVS, PIN_NOW, 3), []);
+  assert.deepStrictEqual(lib.selectShowPins(null, null, PIN_NOW, 3), []);
+  // Everything in the past → empty.
+  var lateNow = new Date("2026-08-02T12:00:00Z").getTime();
+  assert.deepStrictEqual(lib.selectShowPins(PIN_LIVE, PIN_FAVS, lateNow, 3), []);
+});
+
+test("pinDiff splits prev ids into delete and keep", function () {
+  var d = lib.pinDiff(["a", "b", "c"], ["b", "c", "d"]);
+  assert.deepStrictEqual(d, { toDelete: ["a"], toKeep: ["b", "c"] });
+  // New ids ("d") are the pusher's business, not the differ's.
+  assert.deepStrictEqual(lib.pinDiff([], ["x"]), { toDelete: [], toKeep: [] });
+  assert.deepStrictEqual(lib.pinDiff(["x"], []), { toDelete: ["x"], toKeep: [] });
+  assert.deepStrictEqual(lib.pinDiff([], []), { toDelete: [], toKeep: [] });
+  assert.deepStrictEqual(lib.pinDiff(null, null), { toDelete: [], toKeep: [] });
 });
 
 // ── summary ──────────────────────────────────────────────────────────────

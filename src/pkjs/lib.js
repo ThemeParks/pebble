@@ -154,18 +154,17 @@ function getTodaySchedule(schedule, todayStr, nowMs) {
   return null;
 }
 
-// Upcoming OPERATING days for the glance's multi-day slice queue: up to
-// maxDays of {date:"YYYY-MM-DD", o:"HH:MM", c:"HH:MM"}, ordered by date,
-// deduped by date (first OPERATING session per date wins — mirrors
-// getTodaySchedule skipping TICKETED_EVENT entries). Today is included.
-// "Upcoming" reuses getTodaySchedule's fallback thinking for parks east
-// of UTC, where the park-local date can sit ahead of the UTC todayStr:
-// rather than comparing against todayStr, an entry counts while its
+// Shared core for the two upcoming-schedule views: up to maxDays RAW
+// OPERATING entries, ordered by date, deduped by date (first OPERATING
+// session per date wins — mirrors getTodaySchedule skipping
+// TICKETED_EVENT entries). Today is included. "Upcoming" reuses
+// getTodaySchedule's fallback thinking for parks east of UTC, where the
+// park-local date can sit ahead of the UTC todayStr: rather than
+// comparing against a date string, an entry counts while its
 // closingTime is still in the future — which also keeps a still-open
 // overnight session dated "yesterday". Entries missing either time are
-// dropped (the watch needs both to render a slice and set its expiry).
-// nowMs is optional (defaults to Date.now()) so tests can pin time.
-function getUpcomingSchedule(schedule, todayStr, maxDays, nowMs) {
+// dropped (every consumer needs both).
+function upcomingOperatingEntries(schedule, maxDays, nowMs) {
   var now = nowMs === undefined ? Date.now() : nowMs;
   var sorted = schedule.slice().sort(function (a, b) {
     if (a.date < b.date) return -1;
@@ -181,10 +180,41 @@ function getUpcomingSchedule(schedule, todayStr, maxDays, nowMs) {
     if (!e.openingTime || !e.closingTime) continue;
     if (new Date(e.closingTime).getTime() <= now) continue;
     seen[e.date] = true;
+    out.push(e);
+  }
+  return out;
+}
+
+// Upcoming OPERATING days for the glance's multi-day slice queue: up to
+// maxDays of {date:"YYYY-MM-DD", o:"HH:MM", c:"HH:MM"} — the zone-less
+// wire times the WATCH formats for display. todayStr is unused (kept
+// for call-site compatibility; the closing-time-in-future rule replaced
+// it). nowMs is optional (defaults to Date.now()) so tests can pin time.
+function getUpcomingSchedule(schedule, todayStr, maxDays, nowMs) {
+  var entries = upcomingOperatingEntries(schedule, maxDays, nowMs);
+  var out = [];
+  for (var i = 0; i < entries.length; i++) {
     out.push({
-      date: e.date,
-      o: formatTime(e.openingTime),
-      c: formatTime(e.closingTime),
+      date: entries[i].date,
+      o: formatTime(entries[i].openingTime),
+      c: formatTime(entries[i].closingTime),
+    });
+  }
+  return out;
+}
+
+// Same selection, but keeping the RAW ISO strings (offset included):
+// [{date, openIso, closeIso}]. Timeline pins must be built from these —
+// the wire "HH:MM" above is deliberately zone-less and useless for
+// computing a UTC pin time.
+function getUpcomingScheduleIso(schedule, maxDays, nowMs) {
+  var entries = upcomingOperatingEntries(schedule, maxDays, nowMs);
+  var out = [];
+  for (var i = 0; i < entries.length; i++) {
+    out.push({
+      date: entries[i].date,
+      openIso: entries[i].openingTime,
+      closeIso: entries[i].closingTime,
     });
   }
   return out;
@@ -303,15 +333,20 @@ function haversineDist(lat1, lon1, lat2, lon2) {
 // payload). Versioned from day one so later additions (units override,
 // ...) migrate cleanly:
 //   { v: 1, glance: true, destMode: "watch"|"fixed", destId: null|"<uuid>",
-//     myParks: ["<parkUuid>", ...] }
+//     myParks: ["<parkUuid>", ...], pins: false }
 // destMode/destId only mean anything in the uber build; per-destination
 // builds carry them inert. myParks (cap MYPARKS_MAX) drives the packed
-// multi-park glance line pushed to the watch.
+// multi-park glance line pushed to the watch. pins gates the timeline
+// pin engine — OPT-IN, DEFAULT OFF (owner requirement: pins could feel
+// spammy, so nothing is ever pushed to the timeline unless the user
+// ticks the box). Additive field, v stays 1: old stored JSON simply
+// parses to pins=false.
 
 var MYPARKS_MAX = 4;
 
 function defaultSettings() {
-  return { v: 1, glance: true, destMode: "watch", destId: null, myParks: [] };
+  return { v: 1, glance: true, destMode: "watch", destId: null, myParks: [],
+           pins: false };
 }
 
 // Tolerant parse of a stored/returned settings JSON string. Unknown
@@ -327,6 +362,9 @@ function parseSettings(json) {
   if (!p || typeof p !== "object") return s;
   if (typeof p.v === "number" && isFinite(p.v)) s.v = p.v;
   if (typeof p.glance === "boolean") s.glance = p.glance;
+  // Anything but an explicit boolean true stays false — the timeline
+  // must never be opted into by accident.
+  if (typeof p.pins === "boolean") s.pins = p.pins;
   if (p.destMode === "watch" || p.destMode === "fixed") s.destMode = p.destMode;
   if (typeof p.destId === "string" && p.destId) s.destId = p.destId;
   // A fixed mode without a destination to fix on is meaningless — treat
@@ -353,7 +391,9 @@ function parseSettings(json) {
 // semicolon-separated key=value segments ("glance=1"); the watch parser
 // (settings_parse.c) ignores unknown segments, so future fields append
 // as ";key=value" without breaking older watch binaries. Sends only what
-// the watch needs: the glance flag (destMode is applied phone-side) and,
+// the watch needs: the glance flag (destMode is applied phone-side;
+// `pins` is deliberately NOT encoded — timeline pins are pushed by the
+// phone via the timeline web API, the watch never acts on the flag) and,
 // when lineText is non-null, the packed My Parks glance line as
 // ";line=<text>|<expiryEpochSecs>". An empty lineText clears the watch's
 // stored line. The text needs no escaping: buildGlanceLine guarantees it
@@ -544,6 +584,141 @@ function buildFavsStore(prev, parsed, nowMs) {
   return out;
 }
 
+// ── Timeline pins (pure composition) ─────────────────────────────────────
+//
+// Pin objects for the Rebble timeline public web API
+// (PUT/DELETE https://timeline-api.rebble.io/v1/user/pins/<id>, headers
+// X-User-Token + Content-Type: application/json — the I/O lives in
+// index.js). Confirmed against the Pebble/Rebble docs:
+//   id      ≤64 chars, stable — re-PUTting the same id UPDATES the pin
+//           instead of duplicating it, which is the whole idempotence
+//           story: every sync re-pushes the same ids.
+//   time    ISO 8601 UTC ("2026-08-01T13:00:00Z"); must not be >2 days
+//           past or >1 year future.
+//   layout  { type:"genericPin", title, body?, tinyIcon:"system://images/…" }
+//   duration  minutes (optional).
+// The park API's ISO strings carry the park's UTC offset — isoToUtcIso
+// converts them properly. NEVER build a pin time from the wire "HH:MM"
+// (that string is deliberately zone-less display text).
+
+// "2026-08-01T09:00:00-04:00" → "2026-08-01T13:00:00Z" (null when
+// unparseable). Milliseconds are stripped to match the documented pin
+// examples exactly.
+function isoToUtcIso(iso) {
+  if (!iso) return null;
+  var ms = Date.parse(iso);
+  if (isNaN(ms)) return null;
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// Hours pins can't outlive a day — a "24h+" session (data glitch or a
+// true round-the-clock event) caps at 24h so one bad entry can't smear
+// a pin across the whole timeline.
+var HOURS_PIN_CAP_MINS = 24 * 60;
+
+// Park-hours pin. id "tpw-hours-<shortId(parkId)>-<YYYY-MM-DD>" — the
+// date is the PARK-LOCAL date sliced straight off openIso (not the UTC
+// conversion, which can land on the previous day for parks east of
+// UTC), so the same session always maps to the same id. Body carries
+// the park-local wall-clock range; the pin time itself is UTC.
+// Returns null when openIso is unusable (no pin beats a mistimed pin).
+function buildHoursPin(parkId, parkName, openIso, closeIso) {
+  var time = isoToUtcIso(openIso);
+  if (!time || !parkId) return null;
+  var openMs = Date.parse(openIso);
+  var closeMs = closeIso ? Date.parse(closeIso) : NaN;
+  var dur = 0;
+  if (!isNaN(closeMs)) {
+    dur = Math.round((closeMs - openMs) / 60000);
+    if (dur < 0) dur = 0;
+    if (dur > HOURS_PIN_CAP_MINS) dur = HOURS_PIN_CAP_MINS;
+  }
+  var pin = {
+    id: "tpw-hours-" + shortId(parkId) + "-" + String(openIso).slice(0, 10),
+    time: time,
+    layout: {
+      type: "genericPin",
+      title: parkName + " hours",
+      body: "Open " + formatTime(openIso) + " - " + formatTime(closeIso || ""),
+      tinyIcon: "system://images/TIMELINE_CALENDAR",
+    },
+  };
+  if (dur > 0) pin.duration = dur;
+  return pin;
+}
+
+// Favourited-show showtime pin. id
+// "tpw-show-<shortId(showFullId)>-<epochMins>" — epoch minutes of the
+// start instant, so the same showtime is idempotent across syncs while
+// distinct showtimes of the same show get distinct pins. Title is the
+// show, body the park (the watch renders title prominently).
+// Returns null when the start time or id is unusable.
+function buildShowPin(showFullId, showName, parkName, startIso) {
+  var time = isoToUtcIso(startIso);
+  if (!time || !showFullId) return null;
+  return {
+    id: "tpw-show-" + shortId(showFullId) + "-" +
+        Math.floor(Date.parse(startIso) / 60000),
+    time: time,
+    layout: {
+      type: "genericPin",
+      title: showName,
+      body: parkName,
+      tinyIcon: "system://images/SCHEDULED_EVENT",
+    },
+  };
+}
+
+// Rate cap: the timeline is easily spammed, so per sync we push at most
+// the next SHOW_PINS_MAX favourited showtimes (across all favourited
+// shows of the served park).
+var SHOW_PINS_MAX = 3;
+
+// Pick the next `max` FUTURE showtimes across the favourited shows in
+// `liveData` (RAW API entities — full ids, RAW ISO startTimes; the
+// filtered wire shape has neither). favShortIds are the tpw_favs short
+// ids, matched via shortId(entity.id). Returns
+// [{id, name, startTime, startMs}] sorted by start, capped at `max`
+// (default SHOW_PINS_MAX). nowMs optional so tests can pin time.
+function selectShowPins(liveData, favShortIds, nowMs, max) {
+  var now = nowMs == null ? Date.now() : nowMs;
+  var cap = max == null ? SHOW_PINS_MAX : max;
+  var favSet = {};
+  for (var f = 0; f < (favShortIds || []).length; f++) {
+    favSet[favShortIds[f]] = true;
+  }
+  var out = [];
+  for (var i = 0; i < (liveData || []).length; i++) {
+    var e = liveData[i];
+    if (!e || e.entityType !== "SHOW") continue;
+    if (!favSet[shortId(e.id)]) continue;
+    var times = e.showtimes || [];
+    for (var t = 0; t < times.length; t++) {
+      var ms = times[t] && times[t].startTime ? Date.parse(times[t].startTime) : NaN;
+      if (isNaN(ms) || ms <= now) continue;
+      out.push({ id: e.id, name: e.name, startTime: times[t].startTime, startMs: ms });
+    }
+  }
+  out.sort(function (a, b) { return a.startMs - b.startMs; });
+  return out.slice(0, cap);
+}
+
+// Cleanup bookkeeping: which previously-pushed ids does the new sync no
+// longer contain (→ DELETE, best effort), which are being re-pushed
+// (→ keep). Pure set difference — the caller decides which prev ids
+// this sync is actually authoritative for before asking.
+function pinDiff(prevIds, nextIds) {
+  var nextSet = {};
+  for (var n = 0; n < (nextIds || []).length; n++) nextSet[nextIds[n]] = true;
+  var toDelete = [];
+  var toKeep = [];
+  for (var p = 0; p < (prevIds || []).length; p++) {
+    if (nextSet[prevIds[p]]) toKeep.push(prevIds[p]);
+    else toDelete.push(prevIds[p]);
+  }
+  return { toDelete: toDelete, toKeep: toKeep };
+}
+
 // Minimal HTML escaping for text nodes and double-quoted attributes.
 function escapeHtml(s) {
   return String(s)
@@ -598,6 +773,18 @@ function buildConfigPage(settings, dests, isUber, parks) {
   h.push('<div class="card"><h2>Launcher</h2>');
   h.push('<label><input type="checkbox" id="glance"'
          + (settings.glance ? " checked" : "") + "> Show park info in the launcher (AppGlance)</label>");
+  h.push("</div>");
+
+  // Timeline pins toggle — OPT-IN, unchecked by default (settings.pins
+  // defaults false; owner requirement: nothing reaches the timeline
+  // unless the user turns this on).
+  h.push('<div class="card"><h2>Timeline</h2>');
+  h.push('<label><input type="checkbox" id="pins"'
+         + (settings.pins ? " checked" : "")
+         + "> Show park hours and favourite showtimes on the timeline</label>");
+  h.push('<p class="hint">Adds pins for your parks\' opening hours and the next '
+         + "showtimes of shows you've favourited on the watch. Requires the "
+         + "Rebble timeline service; turning this off removes the pins.</p>");
   h.push("</div>");
 
   if (isUber) {
@@ -789,6 +976,7 @@ function buildConfigPage(settings, dests, isUber, parks) {
   h.push("document.getElementById('save').onclick=function(){"
          + "var s={v:1};"
          + "s.glance=document.getElementById('glance').checked;"
+         + "s.pins=document.getElementById('pins').checked;"
          + "var mode=radioVal('destmode');"
          + "var pick=radioVal('destpick');"
          + "s.destMode=(mode==='fixed'&&pick)?'fixed':'watch';"
@@ -855,6 +1043,7 @@ module.exports = {
   shouldServeCache: shouldServeCache,
   getTodaySchedule: getTodaySchedule,
   getUpcomingSchedule: getUpcomingSchedule,
+  getUpcomingScheduleIso: getUpcomingScheduleIso,
   classifyRegion: classifyRegion,
   haversineDist: haversineDist,
   buildDestLines: buildDestLines,
@@ -872,4 +1061,10 @@ module.exports = {
   buildGlanceLine: buildGlanceLine,
   parseFavsSync: parseFavsSync,
   buildFavsStore: buildFavsStore,
+  isoToUtcIso: isoToUtcIso,
+  buildHoursPin: buildHoursPin,
+  buildShowPin: buildShowPin,
+  selectShowPins: selectShowPins,
+  pinDiff: pinDiff,
+  SHOW_PINS_MAX: SHOW_PINS_MAX,
 };
