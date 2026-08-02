@@ -633,15 +633,20 @@ function buildHoursPin(parkId, parkName, openIso, closeIso) {
     if (dur < 0) dur = 0;
     if (dur > HOURS_PIN_CAP_MINS) dur = HOURS_PIN_CAP_MINS;
   }
+  // calendarPin, not genericPin: the timeline LIST renders calendar
+  // pins as events with their full time range ("10:00 - 22:00"), which
+  // is the whole point of an hours pin — device feedback showed a
+  // genericPin surfacing only "10:00" until opened.
   var pin = {
     id: "tpw-hours-" + shortId(parkId) + "-" + String(openIso).slice(0, 10),
     time: time,
     layout: {
-      type: "genericPin",
-      title: parkName + " hours",
+      type: "calendarPin",
+      title: parkName,
       body: "Open " + formatTime(openIso) + " - " + formatTime(closeIso || ""),
       tinyIcon: "system://images/TIMELINE_CALENDAR",
     },
+    actions: [{ title: "Open App", type: "openWatchApp", launchCode: 0 }],
   };
   if (dur > 0) pin.duration = dur;
   return pin;
@@ -666,6 +671,7 @@ function buildShowPin(showFullId, showName, parkName, startIso) {
       body: parkName,
       tinyIcon: "system://images/SCHEDULED_EVENT",
     },
+    actions: [{ title: "Open App", type: "openWatchApp", launchCode: 0 }],
   };
 }
 

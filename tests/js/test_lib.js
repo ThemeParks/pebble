@@ -1123,11 +1123,14 @@ test("buildHoursPin shape (Orlando -04:00)", function () {
     time: "2026-08-01T13:00:00Z",          // UTC, not the -04:00 wall clock
     duration: 780,                          // 13 hours
     layout: {
-      type: "genericPin",
-      title: "Magic Kingdom hours",
+      // calendarPin: the timeline list shows the full range, not just
+      // the start time (device feedback on genericPin).
+      type: "calendarPin",
+      title: "Magic Kingdom",
       body: "Open 09:00 - 22:00",           // park-local wall clock
       tinyIcon: "system://images/TIMELINE_CALENDAR",
     },
+    actions: [{ title: "Open App", type: "openWatchApp", launchCode: 0 }],
   });
   assert.ok(pin.id.length <= 64, "id within the API's 64-char cap");
 });
@@ -1191,6 +1194,8 @@ test("buildShowPin shape and UTC conversion", function () {
     body: "Hollywood Studios",
     tinyIcon: "system://images/SCHEDULED_EVENT",
   });
+  assert.deepStrictEqual(pin.actions,
+    [{ title: "Open App", type: "openWatchApp", launchCode: 0 }]);
   // Same showtime → same id (idempotent); different showtime → new id.
   assert.deepStrictEqual(
     lib.buildShowPin(showId, "Fantasmic!", "Hollywood Studios", start), pin);
