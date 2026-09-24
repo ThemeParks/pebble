@@ -33,6 +33,7 @@
  * this file is purely the two-window UI over that store. */
 
 static Window *s_window = NULL;
+static StatusBarLayer *s_status = NULL;
 static Layer *s_header = NULL;
 static MenuLayer *s_menu = NULL;
 static dest_picker_select_cb_t s_callback = NULL;
@@ -45,6 +46,7 @@ static dest_picker_select_cb_t s_callback = NULL;
 #define MAX_LETTERS 27
 
 static Window *s_region_window = NULL;
+static StatusBarLayer *s_region_status = NULL;
 static Layer *s_region_header = NULL;
 static MenuLayer *s_region_menu = NULL;
 static int s_region_section = -1;            /* g_dest_sections index being browsed */
@@ -66,7 +68,8 @@ static GTextAttributes *round_attrs(void)
 }
 #endif
 
-#define HEADER_HEIGHT PBL_IF_ROUND_ELSE(46, 32)
+/* Status bar (time) + title strip; the list starts below both. */
+#define LIST_Y (UI_STATUS_H + UI_TITLE_H)
 #define ROW_HEIGHT 38
 
 static void rebuild_region_index(void);
@@ -208,11 +211,10 @@ static void draw_window_header(GContext *gctx, Layer *layer, const char *title)
     graphics_context_set_fill_color(gctx, COL_HEADER_BG);
     graphics_fill_rect(gctx, b, 0, GCornerNone);
     graphics_context_set_text_color(gctx, COL_HEADER_FG);
-    const int TEXT_Y = PBL_IF_ROUND_ELSE(16, 2);
     graphics_draw_text(gctx, title,
         fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-        GRect(b.origin.x + 4, b.origin.y + TEXT_Y,
-              b.size.w - 8, b.size.h - TEXT_Y),
+        GRect(b.origin.x + 4, b.origin.y + UI_TITLE_TEXT_Y,
+              b.size.w - 8, b.size.h - UI_TITLE_TEXT_Y),
         GTextOverflowModeTrailingEllipsis,
         GTextAlignmentCenter, NULL);
 }
@@ -499,12 +501,12 @@ static void region_window_load(Window *w)
     Layer *root = window_get_root_layer(w);
     GRect bounds = layer_get_bounds(root);
 
-    s_region_header = layer_create(GRect(0, 0, bounds.size.w, HEADER_HEIGHT));
+    s_region_header = layer_create(GRect(0, UI_STATUS_H, bounds.size.w, UI_TITLE_H));
     layer_set_update_proc(s_region_header, region_header_update_proc);
     layer_add_child(root, s_region_header);
 
-    s_region_menu = menu_layer_create(GRect(0, HEADER_HEIGHT, bounds.size.w,
-                                            bounds.size.h - HEADER_HEIGHT));
+    s_region_menu = menu_layer_create(GRect(0, LIST_Y, bounds.size.w,
+                                            bounds.size.h - LIST_Y));
     menu_layer_set_callbacks(s_region_menu, NULL, (MenuLayerCallbacks){
         .get_num_sections = region_get_num_sections,
         .get_num_rows = region_get_num_rows,
@@ -525,10 +527,12 @@ static void region_window_load(Window *w)
      * provider for the double-press letter jump. */
     window_set_click_config_provider(w, region_click_config);
     layer_add_child(root, menu_layer_get_layer(s_region_menu));
+    s_region_status = ui_status_bar_create(root);
 }
 
 static void region_window_unload(Window *w)
 {
+    if (s_region_status) { status_bar_layer_destroy(s_region_status); s_region_status = NULL; }
     if (s_region_menu) { menu_layer_destroy(s_region_menu); s_region_menu = NULL; }
     if (s_region_header) { layer_destroy(s_region_header); s_region_header = NULL; }
 }
@@ -562,12 +566,12 @@ static void window_load(Window *w)
     Layer *root = window_get_root_layer(w);
     GRect bounds = layer_get_bounds(root);
 
-    s_header = layer_create(GRect(0, 0, bounds.size.w, HEADER_HEIGHT));
+    s_header = layer_create(GRect(0, UI_STATUS_H, bounds.size.w, UI_TITLE_H));
     layer_set_update_proc(s_header, header_update_proc);
     layer_add_child(root, s_header);
 
-    s_menu = menu_layer_create(GRect(0, HEADER_HEIGHT, bounds.size.w,
-                                     bounds.size.h - HEADER_HEIGHT));
+    s_menu = menu_layer_create(GRect(0, LIST_Y, bounds.size.w,
+                                     bounds.size.h - LIST_Y));
     menu_layer_set_callbacks(s_menu, NULL, (MenuLayerCallbacks){
         .get_num_sections = menu_get_num_sections,
         .get_num_rows = menu_get_num_rows,
@@ -587,10 +591,12 @@ static void window_load(Window *w)
 #endif
     menu_layer_set_click_config_onto_window(s_menu, w);
     layer_add_child(root, menu_layer_get_layer(s_menu));
+    s_status = ui_status_bar_create(root);
 }
 
 static void window_unload(Window *w)
 {
+    if (s_status) { status_bar_layer_destroy(s_status); s_status = NULL; }
     if (s_menu) { menu_layer_destroy(s_menu); s_menu = NULL; }
     if (s_header) { layer_destroy(s_header); s_header = NULL; }
 }

@@ -2,8 +2,8 @@
  * park_picker.c — list of parks shown at launch (or when user backs out
  * of the park view).
  *
- * Visual treatment: the same dark-blue header as the park view ("PICK A
- * PARK"), 44-px rows with a large bold title, and the same blue
+ * Visual treatment: the same status bar + dark-blue header as the park
+ * view, two-line rows with a large bold title, and the same blue
  * highlight on the selected row. Custom row rendering matches the look
  * of the attractions/shows page so the app feels cohesive.
  */
@@ -13,16 +13,18 @@
 #include "colours.h"
 #include "storage.h"
 #include "format.h"
+#include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
 #include <stdio.h>
 
-/* Round (gabbro) needs a taller header — the top of the circle clips
- * several pixels so we push the "Walt Disney World" label down to where
- * the viewport is fully visible. */
-#define HEADER_HEIGHT PBL_IF_ROUND_ELSE(46, 32)
-/* Taller rows now because each shows park name on top + hours below. */
-#define ROW_HEIGHT 44
+/* Status bar (time) + title strip. On round the bar fills the band the
+ * circle clips, so the pair is exactly the old 46px round header. */
+#define LIST_Y (UI_STATUS_H + UI_TITLE_H)
+/* Taller rows now because each shows park name on top + hours below.
+ * Rect is 2px tighter so a four-park destination still fits whole under
+ * the status bar: 228 - 46 (bar + title) - 14 (footer) = 168 = 4 x 42. */
+#define ROW_HEIGHT PBL_IF_ROUND_ELSE(44, 42)
 /* Credits footer at the bottom of the window. Fixed-height layer.
  * Skipped entirely on round: at 260×260 gabbro the bottom ~20px fall
  * outside the visible circle, so the footer text would be clipped to
@@ -31,6 +33,7 @@
 #define FOOTER_HEIGHT PBL_IF_ROUND_ELSE(0, 14)
 
 static Window *s_window = NULL;
+static StatusBarLayer *s_status = NULL;
 static Layer *s_header = NULL;
 static MenuLayer *s_menu = NULL;
 static Layer *s_footer = NULL;
@@ -46,13 +49,10 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	graphics_context_set_fill_color(gctx, COL_HEADER_BG);
 	graphics_fill_rect(gctx, b, 0, GCornerNone);
 	graphics_context_set_text_color(gctx, COL_HEADER_FG);
-	/* On round, the top ~14px of the header rect fall outside the visible
-	 * circle, so offset the text down to stay within it. */
-	const int TEXT_Y = PBL_IF_ROUND_ELSE(16, 2);
 	graphics_draw_text(gctx, APP_NAME,
 		fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-		GRect(b.origin.x + 4, b.origin.y + TEXT_Y,
-		      b.size.w - 8, b.size.h - TEXT_Y),
+		GRect(b.origin.x + 4, b.origin.y + UI_TITLE_TEXT_Y,
+		      b.size.w - 8, b.size.h - UI_TITLE_TEXT_Y),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -227,8 +227,8 @@ static void menu_draw_row(GContext *gctx, const Layer *cell,
 	}
 
 	/* Round: PAD is driven by the circle-intersection at the last
-	 * row. With 4 rows of 44px under a 46px header, the bottom row
-	 * runs y=178..222. At y=222 the circle's half-width is only
+	 * row. With 4 rows of 44px under the 46px status bar + title, the
+	 * bottom row runs y=178..222. At y=222 the circle's half-width is only
 	 * ~92px, so the visible x-range at that scanline is x∈[38,222];
 	 * anything to the left of x=38 clips. PAD=40 keeps the icon's
 	 * left edge at x=40, comfortably inside — and because the icon
@@ -302,12 +302,12 @@ static void window_load(Window *w)
 	Layer *root = window_get_root_layer(w);
 	GRect bounds = layer_get_bounds(root);
 
-	s_header = layer_create(GRect(0, 0, bounds.size.w, HEADER_HEIGHT));
+	s_header = layer_create(GRect(0, UI_STATUS_H, bounds.size.w, UI_TITLE_H));
 	layer_set_update_proc(s_header, header_update_proc);
 	layer_add_child(root, s_header);
 
-	s_menu = menu_layer_create(GRect(0, HEADER_HEIGHT, bounds.size.w,
-	                                 bounds.size.h - HEADER_HEIGHT
+	s_menu = menu_layer_create(GRect(0, LIST_Y, bounds.size.w,
+	                                 bounds.size.h - LIST_Y
 	                                               - FOOTER_HEIGHT));
 	menu_layer_set_callbacks(s_menu, NULL, (MenuLayerCallbacks){
 		.get_num_rows = menu_get_num_rows,
@@ -340,10 +340,13 @@ static void window_load(Window *w)
 	layer_set_update_proc(s_footer, footer_update_proc);
 	layer_add_child(root, s_footer);
 #endif
+
+	s_status = ui_status_bar_create(root);
 }
 
 static void window_unload(Window *w)
 {
+	if (s_status) { status_bar_layer_destroy(s_status); s_status = NULL; }
 	if (s_menu) { menu_layer_destroy(s_menu); s_menu = NULL; }
 	if (s_footer) { layer_destroy(s_footer); s_footer = NULL; }
 	if (s_header) { layer_destroy(s_header); s_header = NULL; }
