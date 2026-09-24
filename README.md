@@ -14,6 +14,10 @@ Written in **pure Pebble C** targeting:
   pinned to the top (long-press SELECT on any ride to star it), sort
   modes, and a silent five-minute auto-refresh that never loses your
   place.
+- **The time, always**: every screen carries a status bar with the
+  current time (12/24h per the watch), and it stays put while the park
+  header collapses on scroll — no leaving the app to check the clock
+  against a showtime.
 - **Launcher glance (AppGlance)**: park hours as a live countdown
   ("closes in 45 min", rendered by the firmware) plus up to a week of
   upcoming hours — and, with My Parks configured, a packed live-wait
@@ -127,7 +131,8 @@ pebble/
 │   │   ├── park_view.c / .h      attractions + shows pages, header, tabs
 │   │   ├── settings_view.c / .h  sort mode + favourites sub-menus
 │   │   ├── loading_view.c / .h   loading + error screen
-│   │   ├── ui_common.h           shared interaction conventions
+│   │   ├── ui_common.c / .h      shared interaction conventions + status-bar clock
+│   │   ├── geom.c / .h           pure round-display geometry (visible chord per row)
 │   │   ├── colours.h             themed palette, round-display aware
 │   │   └── config.h / config.c   GENERATED from destinations/<name>.json
 │   └── pkjs/
@@ -194,7 +199,7 @@ python3 scripts/unit_tests.py -k sort    # filter by name
 ```
 
 Compiles the pure-logic C modules (`parkdata`, `sort`, `storage`,
-`format`, `dest_parse`, `settings_parse`, `favs_sync`) with plain gcc
+`format`, `dest_parse`, `settings_parse`, `favs_sync`, `geom`) with plain gcc
 against a stubbed `<pebble.h>` + instrumented in-memory persist, and
 runs the node tests for `src/pkjs/lib.js`. The fast inner loop; CI runs
 it before any builds.
@@ -321,7 +326,7 @@ The credentials live in the `pebble-sdk-home` Docker volume, so subsequent
 - **AppGlance.** On exit the watch publishes a queue of launcher slices: an optional packed My Parks wait line (computed phone-side, pushed with settings), today's hours as a firmware-rendered `time_until` countdown, and up to a week of future days — each with its own expiration so the launcher never shows stale data.
 - **Phone settings.** The config page is generated locally by PKJS and opened as a data URI (no hosting, works offline). Settings push to the watch as a tiny semicolon-separated `SETTINGS_DATA` payload; favourites flow the other way (`FAVS_SYNC`, full-state per toggle) into phone localStorage for future timeline features.
 - **Persist storage.** Favourites (identity-keyed per park UUID via a small LRU allocation index — destination-proof in the uber app), sort mode, last-park, glance state, and the hours cache all live in the Pebble persist API behind RAM caches, so draw paths never touch flash. Key layout is documented at the top of `src/c/storage.c`.
-- **Round displays.** `src/c/colours.h` uses `PBL_IF_COLOR_ELSE` and the C code uses `PBL_IF_ROUND_ELSE` for per-platform offsets. Custom row rendering in `park_view.c` and `park_picker.c` uses `graphics_text_attributes_enable_screen_text_flow` so long names wrap around the circle edge on gabbro.
+- **Round displays.** `src/c/colours.h` uses `PBL_IF_COLOR_ELSE` and the C code uses `PBL_IF_ROUND_ELSE` for per-platform offsets. Custom row rendering in `park_view.c` and `park_picker.c` uses `graphics_text_attributes_enable_screen_text_flow` so long names wrap around the circle edge on gabbro. The status-bar clock at the top of every window sits in the band the circle clips anyway, and the park view's tab strip places its labels and gear inside the visible chord (`geom.c`) wherever the collapsing header leaves it.
 
 ## Troubleshooting
 

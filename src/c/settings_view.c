@@ -22,10 +22,11 @@ typedef enum {
 	SUB_FAV_SHOWS = 3,
 } sub_t;
 
-#define HEADER_HEIGHT PBL_IF_ROUND_ELSE(34, 26)
-#define HEADER_TEXT_Y PBL_IF_ROUND_ELSE(10, 2)
+/* Status bar (time) + title strip; the list starts below both. */
+#define LIST_Y (UI_STATUS_H + UI_TITLE_H)
 
 static Window *s_window = NULL;
+static StatusBarLayer *s_status = NULL;
 static Layer *s_header = NULL;
 static MenuLayer *s_menu = NULL;
 static char s_park_id[40];
@@ -109,8 +110,8 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	graphics_context_set_text_color(gctx, COL_HEADER_FG);
 	graphics_draw_text(gctx, sub_title(),
 		fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-		GRect(b.origin.x + 4, b.origin.y + HEADER_TEXT_Y,
-		      b.size.w - 8, b.size.h - HEADER_TEXT_Y),
+		GRect(b.origin.x + 4, b.origin.y + UI_TITLE_TEXT_Y,
+		      b.size.w - 8, b.size.h - UI_TITLE_TEXT_Y),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -320,13 +321,13 @@ static void window_load(Window *w)
 	Layer *root = window_get_root_layer(w);
 	GRect bounds = layer_get_bounds(root);
 
-	s_header = layer_create(GRect(0, 0, bounds.size.w, HEADER_HEIGHT));
+	s_header = layer_create(GRect(0, UI_STATUS_H, bounds.size.w, UI_TITLE_H));
 	layer_set_update_proc(s_header, header_update_proc);
 	layer_add_child(root, s_header);
 
-	s_menu = menu_layer_create(GRect(0, HEADER_HEIGHT,
+	s_menu = menu_layer_create(GRect(0, LIST_Y,
 	                                 bounds.size.w,
-	                                 bounds.size.h - HEADER_HEIGHT));
+	                                 bounds.size.h - LIST_Y));
 	menu_layer_set_callbacks(s_menu, NULL, (MenuLayerCallbacks){
 		.get_num_rows = menu_num_rows,
 		.get_cell_height = menu_row_height,
@@ -344,11 +345,13 @@ static void window_load(Window *w)
 	menu_layer_set_center_focused(s_menu, false);
 #endif
 	layer_add_child(root, menu_layer_get_layer(s_menu));
+	s_status = ui_status_bar_create(root);
 	window_set_click_config_provider(w, (ClickConfigProvider)click_config);
 }
 
 static void window_unload(Window *w)
 {
+	if (s_status) { status_bar_layer_destroy(s_status); s_status = NULL; }
 	if (s_menu) { menu_layer_destroy(s_menu); s_menu = NULL; }
 	if (s_header) { layer_destroy(s_header); s_header = NULL; }
 }

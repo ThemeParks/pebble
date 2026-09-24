@@ -1,10 +1,10 @@
 /*
  * park_view.c — attractions + shows lists with a tab header.
  *
- * UI structure: Window contains a header (TextLayer for park name + hours)
- * and a MenuLayer below. Two pages: PAGE_WAITS and PAGE_SHOWS, swapped by
- * the SELECT button. The MenuLayer redraws from sorted_indices[] on every
- * data change or page switch.
+ * UI structure: Window contains the time status bar, a header (park name
+ * + hours), the tab strip and a MenuLayer below. Two pages: PAGE_WAITS
+ * and PAGE_SHOWS, swapped by the SELECT button. The MenuLayer redraws
+ * from sorted_indices[] on every data change or page switch.
  *
  * No per-row allocation: we render directly from g_park using the index
  * array. The MenuLayer asks us for one row at a time, on demand.
@@ -18,16 +18,23 @@
 #include "config.h"
 #include "colours.h"
 #include "format.h"
+#include "geom.h"
 #include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
 
-/* Round displays clip the top ~8px of the rectangle — bump the header
- * height on gabbro and offset the text further down so "Magic Kingdom"
- * sits inside the visible circle. */
-#define HEADER_HEIGHT PBL_IF_ROUND_ELSE(44, 36)
-#define HEADER_TEXT_Y PBL_IF_ROUND_ELSE(8, 0)
+/* Top to bottom: time status bar, header (park name + hours), tabs,
+ * list. The status bar never moves; the header collapses up behind it,
+ * so the time stays on screen however far the user scrolls. The bar
+ * also covers the band a round display clips, so the header needs no
+ * per-shape offset. */
+#define HEADER_HEIGHT 36
+#define HEADER_TEXT_Y 0
 #define TAB_HEIGHT 22
+/* Rows below the strip's top edge where the tab labels' glyphs start —
+ * on round the label span is measured there, the narrowest row they
+ * occupy while the strip sits in the top half of the circle. */
+#define TAB_GLYPH_TOP 5
 /* Waits rows are single-line: name + wait time. Shows rows are stacked
  * two-line (name bold on top, multiple times below) so we can fit the
  * full show name AND several upcoming times — a showtime list with only
@@ -42,6 +49,7 @@
 typedef enum { PAGE_WAITS = 0, PAGE_SHOWS = 1 } page_t;
 
 static Window *s_window = NULL;
+static StatusBarLayer *s_status = NULL;
 static Layer *s_header = NULL;
 static Layer *s_tabs = NULL;
 static MenuLayer *s_menu = NULL;
@@ -60,6 +68,22 @@ static bool s_header_collapsed = false;
  * re-sort shuffles row order (waits change → positions change). */
 static char s_selected_id[MAX_ID_LEN] = "";
 
+/* Round-display text flow attributes — allocated lazily so we don't
+ * build and tear down the GTextAttributes on every row redraw. On
+ * rectangular displays this stays NULL and graphics_draw_text renders
+ * straight to the rect. */
+#ifdef PBL_ROUND
+static GTextAttributes *s_text_attrs = NULL;
+static GTextAttributes *round_attrs(void)
+{
+	if (!s_text_attrs) {
+		s_text_attrs = graphics_text_attributes_create();
+		graphics_text_attributes_enable_screen_text_flow(s_text_attrs, 4);
+	}
+	return s_text_attrs;
+}
+#endif
+
 /* --- header ---------------------------------------------------------- */
 
 static void header_update_proc(Layer *layer, GContext *gctx)
@@ -67,6 +91,15 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	GRect b = layer_get_bounds(layer);
 	graphics_context_set_fill_color(gctx, COL_HEADER_BG);
 	graphics_fill_rect(gctx, b, 0, GCornerNone);
+
+	/* Round: flow both lines inside the circle so a long park name
+	 * ellipsises instead of losing its first and last letters to the
+	 * edge ("LEGOLAND New York" did). */
+#ifdef PBL_ROUND
+	GTextAttributes *attrs = round_attrs();
+#else
+	GTextAttributes *attrs = NULL;
+#endif
 
 	/* Park name (top, bold white) */
 	graphics_context_set_text_color(gctx, COL_HEADER_FG);
@@ -76,7 +109,7 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	                   GRect(b.origin.x + 4, b.origin.y + HEADER_TEXT_Y,
 	                         b.size.w - 8, 20),
 	                   GTextOverflowModeTrailingEllipsis,
-	                   GTextAlignmentCenter, NULL);
+	                   GTextAlignmentCenter, attrs);
 
 	/* Hours + freshness (bottom, accent tint). "· Nm" appears once data
 	 * is ≥2min old so the user knows whether they're looking at live
@@ -109,7 +142,7 @@ static void header_update_proc(Layer *layer, GContext *gctx)
 	                   GRect(b.origin.x + 4, b.origin.y + HEADER_TEXT_Y + 18,
 	                         b.size.w - 8, 18),
 	                   GTextOverflowModeTrailingEllipsis,
-	                   GTextAlignmentCenter, NULL);
+	                   GTextAlignmentCenter, attrs);
 }
 
 /* --- menu callbacks -------------------------------------------------- */
@@ -140,42 +173,58 @@ static void tabs_update_proc(Layer *layer, GContext *gctx)
 	 * a discoverability hint that SELECT eventually reaches settings
 	 * (Waits → Shows → Settings). It's an affordance, not a button. */
 	int gear_w = b.size.h;
-	int half = (b.size.w - gear_w) / 2;
+
+	/* Span the labels and gear must fit in: the full width on rect. On
+	 * round, the circle's chord at the labels' top row — measured from
+	 * the strip's live frame, since it slides between just under the
+	 * status bar (collapsed) and under the header (expanded). At either
+	 * spot the full-width layout lost the gear, and collapsed also
+	 * clipped WAITS, off the edge of the circle. */
+	int x0 = b.origin.x, x1 = b.origin.x + b.size.w;
+#ifdef PBL_ROUND
+	/* The strip spans the full screen width, so that's the diameter. */
+	geom_round_span(b.size.w,
+	                layer_get_frame(layer).origin.y + TAB_GLYPH_TOP,
+	                &x0, &x1);
+#endif
+	int gx = x1 - gear_w;
+	int mid = (x0 + gx) / 2;
 
 	bool waits_active = (s_page == PAGE_WAITS);
 
+	/* Segment fills run to the layer edges (a round mask hides the
+	 * overhang); the labels centre within the visible span. */
 	/* Left: WAITS */
 	graphics_context_set_fill_color(gctx,
 		waits_active ? COL_TAB_ACTIVE_BG : COL_TAB_INACTIVE_BG);
-	graphics_fill_rect(gctx, GRect(b.origin.x, b.origin.y, half, b.size.h),
+	graphics_fill_rect(gctx, GRect(b.origin.x, b.origin.y,
+	                               mid - b.origin.x, b.size.h),
 	                   0, GCornerNone);
 	graphics_context_set_text_color(gctx,
 		waits_active ? COL_TAB_ACTIVE_FG : COL_TAB_INACTIVE_FG);
 	graphics_draw_text(gctx, "WAITS",
 		fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-		GRect(b.origin.x, b.origin.y + 2, half, b.size.h - 2),
+		GRect(x0, b.origin.y + 2, mid - x0, b.size.h - 2),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
 	/* Middle: SHOWS */
 	graphics_context_set_fill_color(gctx,
 		waits_active ? COL_TAB_INACTIVE_BG : COL_TAB_ACTIVE_BG);
-	graphics_fill_rect(gctx, GRect(b.origin.x + half, b.origin.y,
-	                               b.size.w - gear_w - half, b.size.h),
+	graphics_fill_rect(gctx, GRect(mid, b.origin.y, gx - mid, b.size.h),
 	                   0, GCornerNone);
 	graphics_context_set_text_color(gctx,
 		waits_active ? COL_TAB_INACTIVE_FG : COL_TAB_ACTIVE_FG);
 	graphics_draw_text(gctx, "SHOWS",
 		fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-		GRect(b.origin.x + half, b.origin.y + 2,
-		      b.size.w - gear_w - half, b.size.h - 2),
+		GRect(mid, b.origin.y + 2, gx - mid, b.size.h - 2),
 		GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 
 	/* Right: gear glyph. Filled circle + four teeth + a hole punched in
 	 * the segment background colour. ~12px total — any finer detail is
 	 * lost at this size. */
-	int gx = b.origin.x + b.size.w - gear_w;
 	graphics_context_set_fill_color(gctx, COL_TAB_INACTIVE_BG);
-	graphics_fill_rect(gctx, GRect(gx, b.origin.y, gear_w, b.size.h),
+	graphics_fill_rect(gctx, GRect(gx, b.origin.y,
+	                               b.origin.x + b.size.w - gx, b.size.h),
 	                   0, GCornerNone);
 	int cx = gx + gear_w / 2;
 	int cy = b.origin.y + b.size.h / 2;
@@ -233,22 +282,6 @@ static void format_show_times(const show_t *s, int max_times,
  * blue selection background with all-white text — it's the target of the
  * long-press favourite gesture, so the user needs to see where the cursor
  * is. */
-/* Round-display text flow attributes — allocated lazily so we don't
- * build and tear down the GTextAttributes on every row redraw. On
- * rectangular displays this stays NULL and graphics_draw_text renders
- * straight to the rect. */
-#ifdef PBL_ROUND
-static GTextAttributes *s_text_attrs = NULL;
-static GTextAttributes *round_attrs(void)
-{
-	if (!s_text_attrs) {
-		s_text_attrs = graphics_text_attributes_create();
-		graphics_text_attributes_enable_screen_text_flow(s_text_attrs, 4);
-	}
-	return s_text_attrs;
-}
-#endif
-
 /* Fill the row's background with either the zebra stripe tint (odd rows)
  * or plain white (even rows). We paint this ourselves so the alternating
  * pattern shows through — MenuLayer's normal/highlight colours can only
@@ -438,9 +471,10 @@ static void animate_frame(Layer *layer, GRect to, PropertyAnimation **slot)
 }
 
 /* Collapse / expand the park-name header to free up space for attractions.
- * When collapsed, the header slides off the top of the screen and the
- * tabs + menu move up by HEADER_HEIGHT — animated, so the layout change
- * reads as motion rather than a jump cut. Tabs stay visible either way. */
+ * When collapsed, the header slides up behind the status bar and the
+ * tabs + menu move up by HEADER_HEIGHT with it — animated, so the layout
+ * change reads as motion rather than a jump cut. The time and the tabs
+ * stay visible either way. */
 static void set_header_collapsed(bool collapse)
 {
 	if (collapse == s_header_collapsed) return;
@@ -449,8 +483,8 @@ static void set_header_collapsed(bool collapse)
 
 	Layer *root = window_get_root_layer(s_window);
 	GRect root_b = layer_get_bounds(root);
-	int header_y = collapse ? -HEADER_HEIGHT : 0;
-	int tabs_y = collapse ? 0 : HEADER_HEIGHT;
+	int header_y = collapse ? UI_STATUS_H - HEADER_HEIGHT : UI_STATUS_H;
+	int tabs_y = collapse ? UI_STATUS_H : UI_STATUS_H + HEADER_HEIGHT;
 	int menu_y = tabs_y + TAB_HEIGHT;
 
 	if (s_header) {
@@ -662,22 +696,22 @@ static void window_load(Window *w)
 	Layer *root = window_get_root_layer(w);
 	GRect bounds = layer_get_bounds(root);
 
-	/* Header: park name + hours (dark-blue themed). */
-	s_header = layer_create(GRect(0, 0, bounds.size.w, HEADER_HEIGHT));
+	/* Header: park name + hours (dark-blue themed), under the status bar. */
+	s_header = layer_create(GRect(0, UI_STATUS_H, bounds.size.w, HEADER_HEIGHT));
 	layer_set_update_proc(s_header, header_update_proc);
 	layer_add_child(root, s_header);
 
 	/* Tabs: WAITS | SHOWS. Always visible — not inside the menu header. */
-	s_tabs = layer_create(GRect(0, HEADER_HEIGHT,
+	s_tabs = layer_create(GRect(0, UI_STATUS_H + HEADER_HEIGHT,
 	                            bounds.size.w, TAB_HEIGHT));
 	layer_set_update_proc(s_tabs, tabs_update_proc);
 	layer_add_child(root, s_tabs);
 
 	/* Menu: rows. The cursor row is visibly highlighted — it's the
 	 * target of the long-press favourite gesture. */
-	s_menu = menu_layer_create(GRect(0, HEADER_HEIGHT + TAB_HEIGHT,
-	                                 bounds.size.w,
-	                                 bounds.size.h - HEADER_HEIGHT - TAB_HEIGHT));
+	int menu_y = UI_STATUS_H + HEADER_HEIGHT + TAB_HEIGHT;
+	s_menu = menu_layer_create(GRect(0, menu_y, bounds.size.w,
+	                                 bounds.size.h - menu_y));
 	MenuLayerCallbacks cbs = {
 		.get_num_sections = menu_num_sections,
 		.get_num_rows = menu_num_rows,
@@ -700,6 +734,9 @@ static void window_load(Window *w)
 #endif
 	layer_add_child(root, menu_layer_get_layer(s_menu));
 
+	/* Last, so it draws over the header sliding up behind it. */
+	s_status = ui_status_bar_create(root);
+
 	window_set_click_config_provider(w, (ClickConfigProvider)click_config);
 	resort();
 }
@@ -711,6 +748,7 @@ static void window_unload(Window *w)
 	if (s_anim_header) animation_unschedule(property_animation_get_animation(s_anim_header));
 	if (s_anim_tabs) animation_unschedule(property_animation_get_animation(s_anim_tabs));
 	if (s_anim_menu) animation_unschedule(property_animation_get_animation(s_anim_menu));
+	if (s_status) { status_bar_layer_destroy(s_status); s_status = NULL; }
 	if (s_menu) { menu_layer_destroy(s_menu); s_menu = NULL; }
 	if (s_tabs) { layer_destroy(s_tabs); s_tabs = NULL; }
 	if (s_header) { layer_destroy(s_header); s_header = NULL; }

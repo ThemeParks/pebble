@@ -5,10 +5,14 @@
 
 #include "loading_view.h"
 #include "colours.h"
+#include "ui_common.h"
 #include <pebble.h>
 #include <string.h>
 
 static Window *s_window = NULL;
+/* The error states can sit on screen for a while ("Phone not
+ * connected"), so this window keeps the clock too. */
+static StatusBarLayer *s_status = NULL;
 static TextLayer *s_label = NULL;
 static char s_text[128];
 
@@ -84,12 +88,14 @@ static void window_load(Window *w)
 	text_layer_set_text_color(s_label, COL_HEADER_BG);
 #endif
 	layer_add_child(root, text_layer_get_layer(s_label));
+	s_status = ui_status_bar_create(root);
 
 	window_set_click_config_provider(w, (ClickConfigProvider)click_config);
 }
 
 static void window_unload(Window *w)
 {
+	if (s_status) { status_bar_layer_destroy(s_status); s_status = NULL; }
 	if (s_label) { text_layer_destroy(s_label); s_label = NULL; }
 }
 
